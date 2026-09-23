@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7b61ff"/>
+      <stop offset="1" stop-color="#ff4f8b"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <!-- calendrier -->
+  <rect x="104" y="128" width="304" height="276" rx="52" fill="#fff"/>
+  <rect x="104" y="128" width="304" height="84" rx="52" fill="#fff"/>
+  <path d="M104 190h304" stroke="#ece8ff" stroke-width="6"/>
+  <rect x="172" y="96" width="26" height="72" rx="13" fill="#fff"/>
+  <rect x="314" y="96" width="26" height="72" rx="13" fill="#fff"/>
+  <!-- appareil photo -->
+  <rect x="166" y="240" width="180" height="124" rx="30" fill="url(#bg)"/>
+  <rect x="222" y="224" width="68" height="30" rx="12" fill="url(#bg)"/>
+  <circle cx="256" cy="302" r="40" fill="#fff"/>
+  <circle cx="256" cy="302" r="24" fill="url(#bg)"/>
+  <circle cx="314" cy="264" r="8" fill="#fff"/>
+</svg>
