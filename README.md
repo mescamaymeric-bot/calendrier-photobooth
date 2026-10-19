@@ -5,6 +5,11 @@ photobooth : pour chaque date, voir d'un coup d'œil si le photobooth est
 **libre**, **en attente de réponse** ou **loué**, et enregistrer les
 coordonnées du client.
 
+Elle contient **deux calendriers** : 📸 **Photobooth** (toutes les
+prestations) et 💍 **Mariages** (fiches dédiées aux mariages), que l'on
+consulte séparément ou **ensemble** grâce au sélecteur
+`Tous · 📸 Photobooth · 💍 Mariages` en haut de l'écran.
+
 C'est une *web-app installable* (PWA) : une fois ajoutée à l'écran d'accueil,
 elle a sa propre icône, s'ouvre en plein écran comme une app de l'App Store
 et fonctionne **sans connexion**. Pas besoin de Mac, de Xcode ni de compte
@@ -29,6 +34,37 @@ développeur Apple.
 - **Sauvegarde** : export/restauration d'un fichier `.json` (à garder dans
   Fichiers / iCloud Drive) et export **CSV** pour Excel / Numbers.
 - Mode sombre automatique.
+
+## 💍 Calendrier Mariages
+
+- **Fiche mariage** : les deux mariés, téléphone, email, adresse ; lieu de
+  réception et son adresse, nombre d'invités, organisateur / wedding
+  planner et son téléphone ; formule, thème / couleurs, texte à mettre sur
+  les photos (« Léa & Thomas · 12.06.2027 »).
+- **Options** à cocher : impressions illimitées, livre d'or, template
+  prénoms + date, fond personnalisé, accessoires, galerie en ligne / QR
+  code, GIF / Boomerang, installation la veille.
+- **Suivi** à cocher directement depuis la fiche : devis envoyé, contrat
+  signé, acompte reçu, template validé par les mariés, solde réglé (avec
+  barre de progression).
+- **Compte à rebours** avant le jour J (« J-42 »), SMS de relance adapté
+  aux mariés, itinéraire vers le lieu de réception.
+- Thème doré quand seul le calendrier Mariages est affiché.
+
+### Les deux calendriers ensemble
+
+- **Tous** : les deux calendriers dans la même vue. Une pastille violette
+  = Photobooth, dorée = Mariage.
+- **📸 Photobooth** ou **💍 Mariages** seul : les jours déjà pris dans
+  l'autre calendrier sont marqués d'un petit rond vide, et la fiche du jour
+  l'indique (« Déjà pris côté 📸 Photobooth »).
+- Les doubles réservations sont vérifiées **sur les deux calendriers**
+  (c'est le même photobooth) : alerte si la date est déjà prise.
+- Une réservation peut changer de calendrier (choix « Calendrier » en haut
+  du formulaire), par exemple pour ranger dans Mariages un ancien
+  événement de type « Mariage ».
+- Les réservations existantes (avant cette version) sont automatiquement
+  dans le calendrier 📸 Photobooth : rien n'est perdu à la mise à jour.
 
 ## Confidentialité
 
@@ -66,6 +102,24 @@ L'iPhone doit pouvoir ouvrir l'appli une première fois via une adresse
 3. Lancez **Booth Planner** depuis l'écran d'accueil. 🎉
 
 Après cette première ouverture, l'appli fonctionne même en mode avion.
+
+## Tester une branche sans toucher à l'appli en service
+
+L'appli publiée correspond à la branche `main`. Pour essayer une autre
+branche (par exemple `claude/mariages`) sans rien changer à l'appli
+installée :
+
+1. Sur GitHub, choisissez la branche, puis **Code → Download ZIP** et
+   dézippez.
+2. Glissez le dossier sur <https://app.netlify.com/drop> : vous obtenez une
+   adresse de test à part.
+3. Ouvrez-la dans Safari sur l'iPhone. Cette version de test a ses propres
+   données (vides) : vos vraies réservations ne sont pas touchées. Vous
+   pouvez y restaurer une sauvegarde (Réglages → Restaurer) pour tester
+   avec vos données.
+
+Quand la version vous convient, fusionnez la branche dans `main` : l'appli
+installée se met à jour et garde toutes ses réservations.
 
 ## Tester sur un ordinateur
 
