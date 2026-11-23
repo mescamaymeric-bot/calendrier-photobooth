@@ -2,6 +2,11 @@
 
 /* =========================================================
    Booth Planner — gestion des réservations de photobooth
+   Deux calendriers dans la même appli :
+     📸 Photobooth : toutes les prestations (anniversaires, entreprises…)
+     💍 Mariages   : fiches dédiées (mariés, lieu de réception, options,
+                     suivi devis / contrat / acompte / template…)
+   consultables séparément ou ensemble (« Tous »).
    Données stockées localement sur l'appareil (localStorage).
    ========================================================= */
 
@@ -14,11 +19,39 @@ const STATUS = {
   free: { label: 'Libre', cls: 'free' },
 };
 
+// Les réservations enregistrées avant l'arrivée des deux calendriers n'ont
+// pas de champ "cal" : elles appartiennent au calendrier Photobooth.
+const CALENDARS = {
+  booth: {
+    label: 'Photobooth', icon: '📸', newTitle: 'Nouvelle réservation', free: 'Photobooth libre',
+    upcoming: 'Prochaines prestations', none: 'Aucune prestation à venir',
+  },
+  wedding: {
+    label: 'Mariages', icon: '💍', newTitle: 'Nouveau mariage', free: 'Aucun mariage ce jour-là',
+    upcoming: 'Prochains mariages', none: 'Aucun mariage à venir',
+  },
+};
+const CAL_MODES = ['all', 'booth', 'wedding'];
+
 const EVENT_TYPES = ['Mariage', 'Anniversaire', 'Soirée d\'entreprise', 'Baptême', 'Communion', 'Salon / Séminaire', 'Soirée privée', 'Autre'];
+
+const WEDDING_OPTIONS = [
+  'Impressions illimitées', 'Livre d\'or', 'Template prénoms + date', 'Fond personnalisé',
+  'Accessoires', 'Galerie en ligne / QR code', 'GIF / Boomerang', 'Installation la veille',
+];
+
+const WEDDING_STEPS = [
+  ['quote', 'Devis envoyé'],
+  ['contract', 'Contrat signé'],
+  ['depositPaid', 'Acompte reçu'],
+  ['template', 'Template validé par les mariés'],
+  ['balance', 'Solde réglé'],
+];
 
 const state = {
   reservations: [],
-  settings: { company: 'Mon Photobooth' },
+  settings: { company: 'Mon Photobooth', cal: 'all' },
+  cal: 'all', // calendrier affiché : 'all', 'booth' ou 'wedding'
   tab: 'calendar',
   month: startOfMonth(new Date()),
   listFilter: 'upcoming',
@@ -37,6 +70,7 @@ function load() {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) Object.assign(state.settings, JSON.parse(raw));
   } catch (e) { /* valeurs par défaut */ }
+  state.cal = CAL_MODES.includes(state.settings.cal) ? state.settings.cal : 'all';
 }
 
 function save() {
@@ -46,6 +80,14 @@ function save() {
   } catch (e) {
     toast('⚠️ Impossible d\'enregistrer');
   }
+}
+
+function setCal(mode) {
+  state.cal = CAL_MODES.includes(mode) ? mode : 'all';
+  state.settings.cal = state.cal;
+  save();
+  haptic();
+  render();
 }
 
 /* ---------------- Dates ---------------- */
@@ -73,20 +115,44 @@ function rangeLabel(r) {
   return `Du ${fmt.short(r.start)} au ${fmt.dayMonthYear(r.end)}`;
 }
 
+// "J-42", "Demain", "Aujourd'hui" (vide si la date est passée)
+function countdown(k) {
+  const d = dayDiff(todayKey(), k);
+  if (d < 0) return '';
+  if (d === 0) return 'Aujourd\'hui';
+  if (d === 1) return 'Demain';
+  return `J-${d}`;
+}
+
 /* ---------------- Queries ---------------- */
 
+function calOf(r) { return r.cal === 'wedding' ? 'wedding' : 'booth'; }
+function isWedding(r) { return calOf(r) === 'wedding'; }
+function inView(r) { return state.cal === 'all' || calOf(r) === state.cal; }
+
 function endOf(r) { return r.end && r.end >= r.start ? r.end : r.start; }
-function onDay(k) { return state.reservations.filter((r) => r.start <= k && k <= endOf(r)); }
-function dayStatus(k) {
-  const list = onDay(k);
+function onDayAll(k) { return state.reservations.filter((r) => r.start <= k && k <= endOf(r)); }
+function onDay(k) { return onDayAll(k).filter(inView); }
+// Réservations de l'AUTRE calendrier ce jour-là (quand un seul est affiché)
+function otherOnDay(k) { return state.cal === 'all' ? [] : onDayAll(k).filter((r) => !inView(r)); }
+function statusOf(list) {
   if (list.some((r) => r.status === 'booked')) return 'booked';
   if (list.length) return 'pending';
   return 'free';
 }
+function dayStatus(k) { return statusOf(onDay(k)); }
 function byId(id) { return state.reservations.find((r) => r.id === id); }
 function sortByDate(list) { return list.slice().sort((a, b) => a.start.localeCompare(b.start) || (a.timeStart || '').localeCompare(b.timeStart || '')); }
+// Chevauchements vérifiés sur les DEUX calendriers : c'est le même photobooth.
 function overlaps(r) {
   return state.reservations.filter((o) => o.id !== r.id && o.start <= endOf(r) && r.start <= endOf(o));
+}
+
+function coupleName(r) {
+  return [r.partner1, r.partner2].map((s) => String(s || '').trim()).filter(Boolean).join(' & ');
+}
+function displayName(r) {
+  return (isWedding(r) && coupleName(r)) || r.clientName || 'Client sans nom';
 }
 
 function clientKey(r) { return (r.clientName || '').trim().toLowerCase(); }
@@ -99,7 +165,8 @@ function clients() {
     const c = map.get(k) || { key: k, name: r.clientName.trim(), reservations: [], total: 0 };
     c.reservations.push(r);
     // Les coordonnées les plus récentes l'emportent
-    ['phone', 'email', 'address', 'company'].forEach((f) => { if (r[f]) c[f] = r[f]; });
+    ['phone', 'email', 'address', 'company', 'partner1', 'partner2'].forEach((f) => { if (r[f]) c[f] = r[f]; });
+    c.cal = calOf(r);
     if (r.status === 'booked') c.total += Number(r.price) || 0;
     map.set(k, c);
   });
@@ -145,9 +212,6 @@ const ICON = {
   upload: '<svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>',
   download: '<svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>',
   table: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 10h18M9 10v10"/></svg>',
-  store: '<svg viewBox="0 0 24 24"><path d="M4 9l1.5-5h13L20 9M4 9v11h16V9M4 9h16M9 20v-6h6v6"/></svg>',
-  share: '<svg viewBox="0 0 24 24"><path d="M12 3v12M7 8l5-5 5 5M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>',
-  user: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg>',
 };
 
 /* ---------------- Rendering: tabs ---------------- */
@@ -155,6 +219,7 @@ const ICON = {
 const view = document.getElementById('view');
 
 function render() {
+  document.body.dataset.mode = state.cal; // thème doré en mode Mariages
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === state.tab));
   if (state.tab === 'calendar') renderCalendar();
   else if (state.tab === 'list') renderList();
@@ -166,6 +231,13 @@ function renderFab() {
   return `<button class="fab" data-act="new" aria-label="Nouvelle réservation">${ICON.plus}</button>`;
 }
 
+function calSwitchHTML() {
+  const opts = [['all', 'Tous'], ['booth', '📸 Photobooth'], ['wedding', '💍 Mariages']];
+  return `<div class="segmented calswitch" role="tablist" aria-label="Calendrier affiché">
+    ${opts.map(([v, l]) => `<button data-setcal="${v}" class="${state.cal === v ? 'on' : ''}" role="tab" aria-selected="${state.cal === v}">${l}</button>`).join('')}
+  </div>`;
+}
+
 /* ---------- Calendrier ---------- */
 
 function renderCalendar() {
@@ -175,27 +247,45 @@ function renderCalendar() {
   const first = (new Date(y, mo, 1).getDay() + 6) % 7; // lundi = 0
   const days = new Date(y, mo + 1, 0).getDate();
   const today = todayKey();
+  const other = state.cal === 'booth' ? 'wedding' : 'booth';
+  let hasOther = false;
 
   let cells = '';
   for (let i = 0; i < first; i++) cells += '<div class="day out"></div>';
   for (let d = 1; d <= days; d++) {
     const k = `${y}-${pad(mo + 1)}-${pad(d)}`;
-    const st = dayStatus(k);
-    const n = onDay(k).length;
+    const list = onDay(k);
+    const st = statusOf(list);
+    let marks = '';
+    if (state.cal === 'all') {
+      // Une pastille par calendrier présent ce jour-là
+      marks = [...new Set(list.map(calOf))].sort().map((c) => `<i class="mk ${c}"></i>`).join('');
+    } else {
+      if (list.length) marks += '<i class="mk cur"></i>';
+      if (otherOnDay(k).length) { marks += '<i class="mk other"></i>'; hasOther = true; }
+    }
     const cls = ['day', st !== 'free' ? st : '', k < today ? 'past' : '', k === today ? 'today' : ''].join(' ');
     cells += `<button class="${cls}" data-day="${k}" aria-label="${esc(fmt.longDay(k))} — ${STATUS[st].label}">
-      ${d}${n > 1 ? `<span class="count">×${n}</span>` : ''}${st !== 'free' ? '<span class="dot"></span>' : ''}
+      ${d}${list.length > 1 ? `<span class="count">×${list.length}</span>` : ''}${marks ? `<span class="marks">${marks}</span>` : ''}
     </button>`;
   }
 
   const mStart = `${y}-${pad(mo + 1)}-01`;
   const mEnd = `${y}-${pad(mo + 1)}-${pad(days)}`;
-  const inMonth = state.reservations.filter((r) => r.start <= mEnd && endOf(r) >= mStart);
+  const inMonth = state.reservations.filter((r) => inView(r) && r.start <= mEnd && endOf(r) >= mStart);
   const booked = inMonth.filter((r) => r.status === 'booked');
   const pending = inMonth.filter((r) => r.status === 'pending');
   const revenue = booked.filter((r) => r.start >= mStart).reduce((s, r) => s + (Number(r.price) || 0), 0);
 
-  const upcoming = sortByDate(state.reservations.filter((r) => endOf(r) >= today)).slice(0, 4);
+  const upcoming = sortByDate(state.reservations.filter((r) => inView(r) && endOf(r) >= today)).slice(0, 4);
+  const calInfo = state.cal === 'all' ? null : CALENDARS[state.cal];
+
+  let legend2 = '';
+  if (state.cal === 'all') {
+    legend2 = '<div class="legend cals"><span><i class="mk booth"></i>📸 Photobooth</span><span><i class="mk wedding"></i>💍 Mariages</span></div>';
+  } else if (hasOther) {
+    legend2 = `<div class="legend cals"><span><i class="mk other"></i>Occupé côté ${CALENDARS[other].icon} ${CALENDARS[other].label}</span></div>`;
+  }
 
   view.innerHTML = `
     <header class="header">
@@ -209,6 +299,8 @@ function renderCalendar() {
         <button class="icon-btn" data-act="next" aria-label="Mois suivant">${ICON.chevR}</button>
       </div>
     </header>
+
+    ${calSwitchHTML()}
 
     <div class="stats">
       <div class="stat booked"><div class="v">${booked.length}</div><div class="l">Loués</div></div>
@@ -224,10 +316,13 @@ function renderCalendar() {
         <span class="pending"><i></i>En attente</span>
         <span class="booked"><i></i>Loué</span>
       </div>
+      ${legend2}
     </section>
 
-    <h2 class="section-title">Prochaines prestations</h2>
-    ${upcoming.length ? upcoming.map(cardHTML).join('') : emptyHTML('📸', 'Aucune prestation à venir', 'Touchez une date du calendrier pour ajouter une réservation.')}
+    <h2 class="section-title">${calInfo ? calInfo.upcoming : 'Prochaines prestations'}</h2>
+    ${upcoming.length
+    ? upcoming.map((r) => cardHTML(r)).join('')
+    : emptyHTML(calInfo ? calInfo.icon : '📸', calInfo ? calInfo.none : 'Aucune prestation à venir', 'Touchez une date du calendrier pour ajouter une réservation.')}
     ${renderFab()}
   `;
 
@@ -249,15 +344,22 @@ function shiftMonth(n) {
   render();
 }
 
-function cardHTML(r) {
+// showIcon : affiche 📸 / 💍 devant le nom (vue « Tous », ou réservation de
+// l'autre calendrier). Toujours appeler via (r) => cardHTML(r), jamais
+// .map(cardHTML) : l'index serait pris pour showIcon.
+function cardHTML(r, showIcon = state.cal === 'all' || !inView(r)) {
   const st = STATUS[r.status] || STATUS.pending;
   const multi = r.end && r.end !== r.start;
-  const sub = [r.eventType, r.location].filter(Boolean).join(' · ') || (multi ? `Jusqu'au ${fmt.short(r.end)}` : fmt.weekday(r.start));
+  const parts = isWedding(r)
+    ? [r.location, r.guests ? `${r.guests} invités` : '', endOf(r) >= todayKey() ? countdown(r.start) : '']
+    : [r.eventType, r.location, r.timeStart];
+  const sub = parts.filter(Boolean).join(' · ') || (multi ? `Jusqu'au ${fmt.short(r.end)}` : fmt.weekday(r.start));
+  const icon = showIcon ? `<span class="cal-ic">${CALENDARS[calOf(r)].icon}</span>` : '';
   return `<button class="card" data-open="${r.id}">
     <div class="datebox ${st.cls}"><span class="d">${parseKey(r.start).getDate()}</span><span class="m">${esc(fmt.monthShort(r.start))}</span></div>
     <div class="main">
-      <div class="name">${esc(r.clientName || 'Client sans nom')}</div>
-      <div class="sub">${esc(sub)}${r.timeStart ? ` · ${esc(r.timeStart)}` : ''}</div>
+      <div class="name">${icon}${esc(displayName(r))}</div>
+      <div class="sub">${esc(sub)}</div>
     </div>
     <div class="right">
       <span class="badge ${st.cls}">${st.label}</span>
@@ -273,12 +375,14 @@ function emptyHTML(emoji, title, text) {
 /* ---------- Liste ---------- */
 
 function renderList() {
+  const total = state.reservations.filter(inView).length;
   view.innerHTML = `
-    <header class="header"><div><div class="eyebrow">${state.reservations.length} au total</div><h1 class="title">Réservations</h1></div></header>
-    <label class="search">${ICON.search}<input id="listSearch" type="search" placeholder="Client, lieu, type…" value="${esc(state.listSearch)}" autocomplete="off"></label>
+    <header class="header"><div><div class="eyebrow">${total} au total</div><h1 class="title">${state.cal === 'wedding' ? 'Mariages' : 'Réservations'}</h1></div></header>
+    ${calSwitchHTML()}
+    <label class="search">${ICON.search}<input id="listSearch" type="search" placeholder="Client, mariés, lieu, type…" value="${esc(state.listSearch)}" autocomplete="off"></label>
     <div class="segmented" id="listSeg">
       ${[['upcoming', 'À venir'], ['pending', 'En attente'], ['booked', 'Loués'], ['past', 'Passées']]
-        .map(([v, l]) => `<button data-v="${v}" class="${state.listFilter === v ? 'on' : ''}">${l}</button>`).join('')}
+    .map(([v, l]) => `<button data-v="${v}" class="${state.listFilter === v ? 'on' : ''}">${l}</button>`).join('')}
     </div>
     <div id="listBody"></div>
     ${renderFab()}
@@ -295,6 +399,7 @@ function renderListBody() {
   const today = todayKey();
   const q = state.listSearch.trim().toLowerCase();
   let list = state.reservations.filter((r) => {
+    if (!inView(r)) return false;
     const upcoming = endOf(r) >= today;
     switch (state.listFilter) {
       case 'upcoming': return upcoming;
@@ -304,7 +409,8 @@ function renderListBody() {
     }
   });
   if (q) {
-    list = list.filter((r) => [r.clientName, r.location, r.eventType, r.phone, r.email, r.notes, r.company]
+    list = list.filter((r) => [r.clientName, r.partner1, r.partner2, r.location, r.venueAddress, r.eventType, r.phone,
+      r.email, r.notes, r.company, r.planner, r.theme]
       .some((v) => String(v || '').toLowerCase().includes(q)));
   }
   list = sortByDate(list);
@@ -325,6 +431,10 @@ function renderListBody() {
 }
 
 /* ---------- Clients ---------- */
+
+function avatarHTML(c) {
+  return c.cal === 'wedding' ? '<div class="avatar wed">💍</div>' : `<div class="avatar">${esc(initials(c.name))}</div>`;
+}
 
 function renderClients() {
   const all = clients();
@@ -348,7 +458,7 @@ function renderClientBody() {
   }
   body.innerHTML = list.map((c) => `
     <button class="card" data-client="${esc(c.key)}">
-      <div class="avatar">${esc(initials(c.name))}</div>
+      ${avatarHTML(c)}
       <div class="main">
         <div class="name">${esc(c.name)}</div>
         <div class="sub">${esc(c.phone || c.email || c.company || '—')}</div>
@@ -366,14 +476,16 @@ function renderSettings() {
   const booked = state.reservations.filter((r) => r.status === 'booked');
   const year = String(new Date().getFullYear());
   const yearRevenue = booked.filter((r) => r.start.startsWith(year)).reduce((s, r) => s + (Number(r.price) || 0), 0);
+  const nWedding = state.reservations.filter(isWedding).length;
+  const nBooth = state.reservations.length - nWedding;
   const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
 
   view.innerHTML = `
     <header class="header"><div><div class="eyebrow">Booth Planner</div><h1 class="title">Réglages</h1></div></header>
 
     <div class="stats">
-      <div class="stat"><div class="v">${state.reservations.length}</div><div class="l">Réservations</div></div>
-      <div class="stat"><div class="v">${clients().length}</div><div class="l">Clients</div></div>
+      <div class="stat"><div class="v">${nBooth}</div><div class="l">📸 Photobooth</div></div>
+      <div class="stat"><div class="v">${nWedding}</div><div class="l">💍 Mariages</div></div>
       <div class="stat money"><div class="v">${fmt.money(yearRevenue)}</div><div class="l">CA ${year}</div></div>
     </div>
 
@@ -401,7 +513,7 @@ function renderSettings() {
         <span class="t">Tout effacer</span>
       </button>
     </div>
-    <p class="hint">Vos données sont enregistrées uniquement sur cet iPhone, dans l'application. Pensez à exporter une sauvegarde de temps en temps.</p>
+    <p class="hint">Vos données (les deux calendriers) sont enregistrées uniquement sur cet iPhone, dans l'application. Pensez à exporter une sauvegarde de temps en temps.</p>
 
     ${standalone ? '' : `
     <div class="group-title">Installer sur l'iPhone</div>
@@ -410,7 +522,7 @@ function renderSettings() {
 3. Choisissez <b>« Sur l'écran d'accueil »</b>.
 L'appli s'ouvrira alors en plein écran, comme une app de l'App Store, même sans connexion.</div></div>`}
 
-    <div class="brand"><img src="icons/icon-192.png" alt="">Booth Planner · v1.0</div>
+    <div class="brand"><img src="icons/icon-192.png" alt="">Booth Planner · v2.0</div>
     <input type="file" id="importFile" accept="application/json,.json" hidden>
   `;
 
@@ -481,57 +593,147 @@ function closeAllSheets() { sheets.slice().forEach(closeSheet); }
 
 /* ---------- Jour ---------- */
 
+function choicesHTML(k, cal) {
+  const wed = cal === 'wedding';
+  return `<div class="choice-grid">
+    <button class="choice pending" data-new-on="${k}" data-status="pending" data-ncal="${cal}">
+      <span class="ic">${ICON.clock}</span><b>En attente</b><small>${wed ? 'Devis envoyé aux mariés' : 'Devis envoyé, réponse attendue'}</small>
+    </button>
+    <button class="choice booked" data-new-on="${k}" data-status="booked" data-ncal="${cal}">
+      <span class="ic">${ICON.check}</span><b>Loué</b><small>${wed ? 'Mariage confirmé' : 'Réservation confirmée'}</small>
+    </button>
+  </div>`;
+}
+
 function openDay(k) {
   haptic();
   const list = sortByDate(onDay(k));
-  const st = dayStatus(k);
+  const others = sortByDate(otherOnDay(k));
+  const st = statusOf(list);
   const past = k < todayKey();
+  const freeLabel = state.cal === 'all' ? 'Libre' : CALENDARS[state.cal].free;
+  const other = others.length ? CALENDARS[calOf(others[0])] : null;
+
+  let add;
+  if (list.length) {
+    add = `<button class="btn secondary" data-new-on="${k}" data-ncal="${state.cal === 'all' ? 'booth' : state.cal}">${ICON.plus} Ajouter une autre réservation</button>`;
+  } else if (state.cal === 'all') {
+    add = `<div class="group-title">📸 Photobooth</div>${choicesHTML(k, 'booth')}
+      <div class="group-title">💍 Mariage</div>${choicesHTML(k, 'wedding')}`;
+  } else {
+    add = choicesHTML(k, state.cal);
+  }
+
+  // Libre dans ce calendrier mais déjà pris dans l'autre : on le dit
+  // clairement plutôt que d'afficher un « libre » vert trompeur.
+  const badge = st === 'free' && others.length
+    ? `<span class="badge ${STATUS[statusOf(others)].cls}">Déjà pris côté ${other.icon} ${other.label}</span>`
+    : `<span class="badge ${STATUS[st].cls}">${st === 'free' ? freeLabel : STATUS[st].label}</span>`;
   const body = `
     <div class="day-hero">
       <div class="dname">${esc(fmt.weekday(k))}</div>
       <div class="dnum">${esc(fmt.dayMonthYear(k))}</div>
-      <span class="badge ${STATUS[st].cls}">${st === 'free' ? 'Photobooth libre' : STATUS[st].label}</span>
+      ${badge}
     </div>
-    ${list.map(cardHTML).join('')}
-    ${list.length ? `<button class="btn secondary" data-new-on="${k}">${ICON.plus} Ajouter une autre réservation</button>` : `
-      <div class="choice-grid">
-        <button class="choice pending" data-new-on="${k}" data-status="pending">
-          <span class="ic">${ICON.clock}</span><b>En attente</b><small>Devis envoyé, réponse attendue</small>
-        </button>
-        <button class="choice booked" data-new-on="${k}" data-status="booked">
-          <span class="ic">${ICON.check}</span><b>Loué</b><small>Réservation confirmée</small>
-        </button>
-      </div>
-      ${past ? '<p class="hint" style="text-align:center">Cette date est passée.</p>' : ''}`}
+    ${list.map((r) => cardHTML(r)).join('')}
+    ${add}
+    ${past ? '<p class="hint" style="text-align:center">Cette date est passée.</p>' : ''}
+    ${others.length ? `<div class="group-title">Aussi ce jour-là · ${other.icon} ${other.label}</div>${others.map((r) => cardHTML(r)).join('')}` : ''}
   `;
   openSheet({ title: '', right: '<button class="txt-btn r" data-close>OK</button>', body });
 }
 
 /* ---------- Détail ---------- */
 
-function openDetail(id) {
-  const r = byId(id);
-  if (!r) return;
+function detailHTML(r) {
+  const wed = isWedding(r);
   const st = STATUS[r.status] || STATUS.pending;
+  const name = displayName(r);
   const tel = telHref(r.phone);
   const price = Number(r.price) || 0;
   const deposit = Number(r.deposit) || 0;
   const pct = price ? Math.min(100, Math.round((deposit / price) * 100)) : 0;
-  const mapsQ = encodeURIComponent(r.location || r.address || '');
+  const place = wed ? [r.location, r.venueAddress].filter(Boolean).join(', ') : (r.location || r.address || '');
+  const mapsQ = encodeURIComponent(place);
+  const company = state.settings.company || '';
   const smsBody = encodeURIComponent(r.status === 'pending'
-    ? `Bonjour ${r.clientName || ''}, je reviens vers vous concernant la location du photobooth pour le ${fmt.dayMonthYear(r.start)}. Souhaitez-vous confirmer la réservation ? ${state.settings.company || ''}`
-    : `Bonjour ${r.clientName || ''}, `);
+    ? (wed
+      ? `Bonjour ${name}, je reviens vers vous concernant le photobooth pour votre mariage du ${fmt.dayMonthYear(r.start)}. Souhaitez-vous confirmer la réservation ? ${company}`
+      : `Bonjour ${name}, je reviens vers vous concernant la location du photobooth pour le ${fmt.dayMonthYear(r.start)}. Souhaitez-vous confirmer la réservation ? ${company}`)
+    : `Bonjour ${name}, `);
   const time = [r.timeStart, r.timeEnd].filter(Boolean).join(' – ');
+  const cd = endOf(r) >= todayKey() ? countdown(r.start) : '';
 
   const rows = (items) => items.filter(([, v]) => v).map(([k, v, cls]) => `<div class="row"><span class="k">${k}</span><span class="v ${cls || ''}">${v}</span></div>`).join('');
+  const group = (title, items, emptyLabel, extra = '') => {
+    const html = rows(items) + extra;
+    if (!html && !emptyLabel) return '';
+    return `<div class="group-title">${title}</div><div class="group">${html || `<div class="row"><span class="k">${emptyLabel}</span></div>`}</div>`;
+  };
+  const link = (scheme, value, shown) => (value ? `<a href="${scheme}:${esc(value)}">${esc(shown)}</a>` : '');
 
-  const body = `
-    <div class="detail-head">
-      <div class="avatar">${esc(initials(r.clientName))}</div>
-      <h3>${esc(r.clientName || 'Client sans nom')}</h3>
+  const head = wed
+    ? `<div class="avatar wed">💍</div>
+      <h3>${esc(name)}</h3>
       <p>${esc(rangeLabel(r))}</p>
-      <span class="badge ${st.cls}">${st.label}</span>
-    </div>
+      <div class="badges"><span class="badge ${st.cls}">${st.label}</span>${cd ? `<span class="badge count">${cd}</span>` : ''}</div>`
+    : `<div class="avatar">${esc(initials(r.clientName))}</div>
+      <h3>${esc(name)}</h3>
+      <p>${esc(rangeLabel(r))}</p>
+      <span class="badge ${st.cls}">${st.label}</span>`;
+
+  let sections;
+  if (wed) {
+    const steps = r.checklist || {};
+    const done = WEDDING_STEPS.filter(([k]) => steps[k]).length;
+    const opts = r.options || [];
+    sections = `
+      <div class="group-title">Suivi · ${done}/${WEDDING_STEPS.length}</div>
+      <div class="group">
+        <div class="progress top"><i style="width:${Math.round((done / WEDDING_STEPS.length) * 100)}%"></i></div>
+        ${WEDDING_STEPS.map(([k, l]) => `<button class="row step ${steps[k] ? 'done' : ''}" data-step="${r.id}|${k}"><span class="tick">${ICON.check}</span><span>${l}</span></button>`).join('')}
+      </div>
+      ${group('Mariage', [
+    ['Date', esc(rangeLabel(r))],
+    ['Horaires', esc(time)],
+    ['Lieu', esc(r.location)],
+    ['Adresse', esc(r.venueAddress)],
+    ['Invités', esc(r.guests)],
+  ])}
+      ${group('Prestation', [
+    ['Formule', esc(r.package)],
+    ['Thème', esc(r.theme)],
+    ['Texte photo', esc(r.templateText)],
+  ], '', opts.length ? `<div class="chips in-group">${opts.map((o) => `<span class="chip on">${esc(o)}</span>`).join('')}</div>` : '')}
+      ${group('Contacts', [
+    ['Mariés', esc(name)],
+    ['Téléphone', link('tel', tel, r.phone)],
+    ['Email', link('mailto', r.email, r.email)],
+    ['Adresse', esc(r.address)],
+    ['Organisateur', esc(r.planner)],
+    ['Tél. orga.', link('tel', telHref(r.plannerPhone), r.plannerPhone)],
+  ], 'Aucune coordonnée')}`;
+  } else {
+    sections = `
+      ${group('Prestation', [
+    ['Type', esc(r.eventType)],
+    ['Date', esc(rangeLabel(r))],
+    ['Horaires', esc(time)],
+    ['Lieu', esc(r.location)],
+    ['Formule', esc(r.package)],
+    ['Invités', esc(r.guests)],
+  ], 'Aucun détail')}
+      ${group('Client', [
+    ['Nom', esc(r.clientName)],
+    ['Société', esc(r.company)],
+    ['Téléphone', link('tel', tel, r.phone)],
+    ['Email', link('mailto', r.email, r.email)],
+    ['Adresse', esc(r.address)],
+  ], 'Aucune coordonnée')}`;
+  }
+
+  return `
+    <div class="detail-head">${head}</div>
 
     <div class="actions">
       <a class="action ${tel ? '' : 'disabled'}" href="tel:${esc(tel)}">${ICON.phone}Appeler</a>
@@ -542,37 +744,16 @@ function openDetail(id) {
 
     ${r.status === 'pending' ? `<button class="btn" data-confirm="${r.id}" style="margin:0 0 16px">${ICON.check} Confirmer la location</button>` : ''}
 
-    <div class="group-title">Prestation</div>
-    <div class="group">
-      ${rows([
-        ['Type', esc(r.eventType)],
-        ['Date', esc(rangeLabel(r))],
-        ['Horaires', esc(time)],
-        ['Lieu', esc(r.location)],
-        ['Formule', esc(r.package)],
-        ['Invités', esc(r.guests)],
-      ]) || '<div class="row"><span class="k">Aucun détail</span></div>'}
-    </div>
-
-    <div class="group-title">Client</div>
-    <div class="group">
-      ${rows([
-        ['Nom', esc(r.clientName)],
-        ['Société', esc(r.company)],
-        ['Téléphone', tel ? `<a href="tel:${esc(tel)}">${esc(r.phone)}</a>` : ''],
-        ['Email', r.email ? `<a href="mailto:${esc(r.email)}">${esc(r.email)}</a>` : ''],
-        ['Adresse', esc(r.address)],
-      ]) || '<div class="row"><span class="k">Aucune coordonnée</span></div>'}
-    </div>
+    ${sections}
 
     ${price || deposit ? `
     <div class="group-title">Paiement</div>
     <div class="group">
       ${rows([
-        ['Prix total', price ? fmt.money(price) : '', 'strong'],
-        ['Acompte versé', deposit ? fmt.money(deposit) : ''],
-        ['Reste à payer', price ? fmt.money(Math.max(0, price - deposit)) : '', 'strong'],
-      ])}
+    ['Prix total', price ? fmt.money(price) : '', 'strong'],
+    ['Acompte versé', deposit ? fmt.money(deposit) : ''],
+    ['Reste à payer', price ? fmt.money(Math.max(0, price - deposit)) : '', 'strong'],
+  ])}
       ${price ? `<div class="progress"><i style="width:${pct}%"></i></div>` : ''}
     </div>` : ''}
 
@@ -581,146 +762,276 @@ function openDetail(id) {
     <button class="btn secondary" data-ics="${r.id}">${ICON.cal} Ajouter à mon calendrier</button>
     <button class="btn danger" data-delete="${r.id}">${ICON.trash} Supprimer (remettre libre)</button>
   `;
+}
 
+function openDetail(id) {
+  const r = byId(id);
+  if (!r) return;
   openSheet({
     title: '',
     left: '<button class="txt-btn" data-close>Fermer</button>',
     right: `<button class="txt-btn r" data-edit="${r.id}">Modifier</button>`,
-    body,
+    body: detailHTML(r),
     full: true,
   });
 }
 
+// Coche / décoche une étape du suivi d'un mariage directement depuis la fiche
+function toggleStep(btn, value) {
+  const [id, key] = value.split('|');
+  const r = byId(id);
+  if (!r) return;
+  r.checklist = { ...(r.checklist || {}), [key]: !(r.checklist || {})[key] };
+  r.updatedAt = new Date().toISOString();
+  save();
+  haptic();
+  const body = btn.closest('.sheet-body');
+  const scroll = body.scrollTop;
+  body.innerHTML = detailHTML(r);
+  body.scrollTop = scroll;
+}
+
 /* ---------- Formulaire ---------- */
 
-function openForm({ id, date, status, prefill } = {}) {
-  const existing = id ? byId(id) : null;
-  const r = existing ? { ...existing } : {
-    id: uid(), status: status || 'pending', start: date || todayKey(), end: '', eventType: '', ...prefill,
-  };
-  const allClients = clients();
-
+function formHTML(r, allClients, existing) {
   const field = (label, name, attrs = '') => `<div class="field"><label for="f-${name}">${label}</label><input id="f-${name}" name="${name}" value="${esc(r[name] || '')}" ${attrs}></div>`;
+  const wed = isWedding(r);
 
-  const body = `
+  const top = `
+    <div class="group-title" style="margin-top:6px">Calendrier</div>
+    <div class="cal-pick" id="calPick">
+      <button type="button" data-v="booth" class="${wed ? '' : 'on'}">📸 Photobooth</button>
+      <button type="button" data-v="wedding" class="${wed ? 'on' : ''}">💍 Mariage</button>
+    </div>
+
+    <div class="group-title">Statut</div>
+    <div class="status-pick" id="statusPick">
+      <button type="button" data-v="pending" class="${r.status === 'pending' ? 'on' : ''}">En attente</button>
+      <button type="button" data-v="booked" class="${r.status === 'booked' ? 'on' : ''}">Loué</button>
+    </div>
+
+    <div class="group-title">${wed ? 'Date du mariage' : 'Date'}</div>
+    <div class="group">
+      ${field('Date', 'start', 'type="date" required')}
+      ${field('Fin (option.)', 'end', 'type="date"')}
+      ${field('Début', 'timeStart', 'type="time"')}
+      ${field('Fin', 'timeEnd', 'type="time"')}
+    </div>
+    <div id="overlapWarn"></div>`;
+
+  const middle = wed ? `
+    <div class="group-title">Les mariés</div>
+    <div class="group">
+      ${field('Marié(e) 1', 'partner1', 'placeholder="Prénom Nom" autocapitalize="words"')}
+      ${field('Marié(e) 2', 'partner2', 'placeholder="Prénom Nom" autocapitalize="words"')}
+      ${field('Téléphone', 'phone', 'type="tel" inputmode="tel" placeholder="06 12 34 56 78"')}
+      ${field('Email', 'email', 'type="email" inputmode="email" autocapitalize="off" placeholder="maries@mail.com"')}
+      ${field('Adresse', 'address', 'placeholder="Adresse de facturation"')}
+    </div>
+
+    <div class="group-title">Réception</div>
+    <div class="group">
+      ${field('Lieu', 'location', 'placeholder="Domaine, château, salle…"')}
+      ${field('Adresse', 'venueAddress', 'placeholder="Adresse du lieu"')}
+      ${field('Invités', 'guests', 'type="number" inputmode="numeric" placeholder="0"')}
+      ${field('Organisateur', 'planner', 'placeholder="Wedding planner, traiteur…"')}
+      ${field('Tél. orga.', 'plannerPhone', 'type="tel" inputmode="tel" placeholder="06…"')}
+    </div>
+
+    <div class="group-title">Prestation</div>
+    <div class="group">
+      ${field('Formule', 'package', 'placeholder="Ex : Formule Mariage"')}
+      ${field('Thème', 'theme', 'placeholder="Couleurs, ambiance…"')}
+      ${field('Texte photo', 'templateText', 'placeholder="Léa &amp; Thomas · 12.06.2027"')}
+    </div>
+    <div class="group-title">Options</div>
+    <div class="chips" id="optChips">
+      ${WEDDING_OPTIONS.map((o) => `<button type="button" class="chip ${(r.options || []).includes(o) ? 'on' : ''}" data-opt="${esc(o)}">${esc(o)}</button>`).join('')}
+    </div>` : `
+    <div class="group-title">Client</div>
+    <div class="group">
+      ${field('Nom', 'clientName', 'placeholder="Prénom Nom" list="clientList" autocapitalize="words"')}
+      ${field('Société', 'company', 'placeholder="Facultatif"')}
+      ${field('Téléphone', 'phone', 'type="tel" inputmode="tel" placeholder="06 12 34 56 78"')}
+      ${field('Email', 'email', 'type="email" inputmode="email" autocapitalize="off" placeholder="client@mail.com"')}
+      ${field('Adresse', 'address', 'placeholder="Adresse de facturation"')}
+    </div>
+    <datalist id="clientList">${allClients.map((c) => `<option value="${esc(c.name)}"></option>`).join('')}</datalist>
+
+    <div class="group-title">Événement</div>
+    <div class="group">
+      <div class="field"><label for="f-eventType">Type</label>
+        <select id="f-eventType" name="eventType">
+          <option value="">Choisir…</option>
+          ${EVENT_TYPES.map((t) => `<option ${r.eventType === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+        </select>
+      </div>
+      ${field('Lieu', 'location', 'placeholder="Salle, ville…"')}
+      ${field('Formule', 'package', 'placeholder="Ex : Formule Premium"')}
+      ${field('Invités', 'guests', 'type="number" inputmode="numeric" placeholder="0"')}
+    </div>`;
+
+  const tarif = `
+    <div class="group-title">Tarif</div>
+    <div class="group">
+      ${field('Prix total €', 'price', 'type="number" inputmode="decimal" step="0.01" placeholder="0"')}
+      ${field('Acompte €', 'deposit', 'type="number" inputmode="decimal" step="0.01" placeholder="0"')}
+    </div>`;
+
+  const steps = wed ? `
+    <div class="group-title">Suivi</div>
+    <div class="group" id="stepList">
+      ${WEDDING_STEPS.map(([k, l]) => `<button type="button" class="row step ${(r.checklist || {})[k] ? 'done' : ''}" data-fstep="${k}"><span class="tick">${ICON.check}</span><span>${l}</span></button>`).join('')}
+    </div>` : '';
+
+  return `
     <form id="resForm" autocomplete="off">
-      <div class="group-title" style="margin-top:6px">Statut</div>
-      <div class="status-pick" id="statusPick">
-        <button type="button" data-v="pending" class="${r.status === 'pending' ? 'on' : ''}">En attente</button>
-        <button type="button" data-v="booked" class="${r.status === 'booked' ? 'on' : ''}">Loué</button>
-      </div>
-
-      <div class="group-title">Date</div>
-      <div class="group">
-        ${field('Date', 'start', 'type="date" required')}
-        ${field('Fin (option.)', 'end', 'type="date"')}
-        ${field('Début', 'timeStart', 'type="time"')}
-        ${field('Fin', 'timeEnd', 'type="time"')}
-      </div>
-      <div id="overlapWarn"></div>
-
-      <div class="group-title">Client</div>
-      <div class="group">
-        ${field('Nom', 'clientName', 'placeholder="Prénom Nom" list="clientList" autocapitalize="words" required')}
-        ${field('Société', 'company', 'placeholder="Facultatif"')}
-        ${field('Téléphone', 'phone', 'type="tel" inputmode="tel" placeholder="06 12 34 56 78"')}
-        ${field('Email', 'email', 'type="email" inputmode="email" autocapitalize="off" placeholder="client@mail.com"')}
-        ${field('Adresse', 'address', 'placeholder="Adresse de facturation"')}
-      </div>
-      <datalist id="clientList">${allClients.map((c) => `<option value="${esc(c.name)}"></option>`).join('')}</datalist>
-
-      <div class="group-title">Événement</div>
-      <div class="group">
-        <div class="field"><label for="f-eventType">Type</label>
-          <select id="f-eventType" name="eventType">
-            <option value="">Choisir…</option>
-            ${EVENT_TYPES.map((t) => `<option ${r.eventType === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
-          </select>
-        </div>
-        ${field('Lieu', 'location', 'placeholder="Salle, ville…"')}
-        ${field('Formule', 'package', 'placeholder="Ex : Formule Premium"')}
-        ${field('Invités', 'guests', 'type="number" inputmode="numeric" placeholder="0"')}
-      </div>
-
-      <div class="group-title">Tarif</div>
-      <div class="group">
-        ${field('Prix total €', 'price', 'type="number" inputmode="decimal" step="0.01" placeholder="0"')}
-        ${field('Acompte €', 'deposit', 'type="number" inputmode="decimal" step="0.01" placeholder="0"')}
-      </div>
-
+      ${top}
+      ${middle}
+      ${tarif}
+      ${steps}
       <div class="group-title">Notes</div>
       <div class="group">
-        <div class="field area full"><textarea name="notes" placeholder="Options, fond, livraison, contraintes…">${esc(r.notes || '')}</textarea></div>
+        <div class="field area full"><textarea name="notes" placeholder="${wed ? 'Déroulé de la soirée, contraintes du lieu, demandes des mariés…' : 'Options, fond, livraison, contraintes…'}">${esc(r.notes || '')}</textarea></div>
       </div>
 
       <button class="btn" type="submit">${ICON.check} Enregistrer</button>
       ${existing ? `<button class="btn danger" type="button" data-delete="${r.id}">${ICON.trash} Supprimer</button>` : ''}
-    </form>
-  `;
+    </form>`;
+}
+
+function openForm({ id, date, status, cal, prefill } = {}) {
+  const existing = id ? byId(id) : null;
+  const draft = existing
+    ? { ...existing, options: [...(existing.options || [])], checklist: { ...(existing.checklist || {}) } }
+    : {
+      id: uid(), status: status || 'pending', start: date || todayKey(), end: '',
+      cal: cal || (state.cal === 'wedding' ? 'wedding' : 'booth'), options: [], checklist: {}, ...prefill,
+    };
+  draft.cal = calOf(draft);
+  const allClients = clients();
+  const titleOf = () => (existing ? 'Modifier' : CALENDARS[draft.cal].newTitle);
 
   openSheet({
-    title: existing ? 'Modifier' : 'Nouvelle réservation',
+    title: titleOf(),
     left: '<button class="txt-btn" data-close>Annuler</button>',
     right: '<button class="txt-btn r" data-submit>OK</button>',
-    body,
+    body: formHTML(draft, allClients, existing),
     full: true,
-    onMount(sheet, entry) {
-      const form = sheet.querySelector('#resForm');
-      let status = r.status;
+    onMount(sheet) {
+      const formEl = () => sheet.querySelector('#resForm');
+      // Reprend les champs texte saisis (options et suivi sont déjà dans draft)
+      const collect = () => Object.assign(draft, Object.fromEntries(new FormData(formEl()).entries()));
 
-      sheet.querySelector('#statusPick').addEventListener('click', (e) => {
-        const b = e.target.closest('button'); if (!b) return;
-        status = b.dataset.v; haptic();
-        sheet.querySelectorAll('#statusPick button').forEach((x) => x.classList.toggle('on', x === b));
-      });
-
-      const checkOverlap = () => {
-        const s = form.start.value; const en = form.end.value;
-        const warn = sheet.querySelector('#overlapWarn');
-        if (!s) { warn.innerHTML = ''; return; }
-        const others = overlaps({ id: r.id, start: s, end: en && en >= s ? en : '' });
-        warn.innerHTML = others.length
-          ? `<div class="warn">⚠️ Date déjà prise : ${others.map((o) => `${esc(o.clientName || 'Client')} (${STATUS[o.status].label.toLowerCase()})`).join(', ')}</div>`
-          : '';
+      const mount = () => {
+        sheet.querySelector('.sheet-body').innerHTML = formHTML(draft, allClients, existing);
+        sheet.querySelector('.sheet-bar h2').textContent = titleOf();
+        bind();
       };
-      form.start.addEventListener('change', checkOverlap);
-      form.end.addEventListener('change', checkOverlap);
-      checkOverlap();
-
-      // Remplissage automatique des coordonnées d'un client existant
-      form.clientName.addEventListener('change', () => {
-        const c = allClients.find((x) => x.key === form.clientName.value.trim().toLowerCase());
-        if (!c) return;
-        ['phone', 'email', 'address', 'company'].forEach((f) => { if (!form[f].value && c[f]) form[f].value = c[f]; });
-      });
 
       const submit = (e) => {
         if (e) e.preventDefault();
-        const data = Object.fromEntries(new FormData(form).entries());
-        if (!data.start) { toast('Choisissez une date'); return; }
-        if (!data.clientName.trim()) { toast('Indiquez le nom du client'); form.clientName.focus(); return; }
-        if (data.end && data.end < data.start) { toast('La date de fin est avant le début'); return; }
-        if (data.end === data.start) data.end = '';
-        const rec = {
-          ...r, ...data, status,
-          clientName: data.clientName.trim(),
-          updatedAt: new Date().toISOString(),
-          createdAt: r.createdAt || new Date().toISOString(),
-        };
+        const form = formEl();
+        collect();
+        if (!draft.start) { toast('Choisissez une date'); return; }
+        if (isWedding(draft)) {
+          draft.partner1 = (draft.partner1 || '').trim();
+          draft.partner2 = (draft.partner2 || '').trim();
+          if (!draft.partner1 && !draft.partner2) { toast('Indiquez le nom des mariés'); form.elements.partner1.focus(); return; }
+          draft.clientName = coupleName(draft);
+        } else {
+          draft.clientName = (draft.clientName || '').trim();
+          if (!draft.clientName) { toast('Indiquez le nom du client'); form.elements.clientName.focus(); return; }
+        }
+        if (draft.end && draft.end < draft.start) { toast('La date de fin est avant le début'); return; }
+        if (draft.end === draft.start) draft.end = '';
+        const now = new Date().toISOString();
+        const rec = { ...draft, updatedAt: now, createdAt: draft.createdAt || now };
         const clash = overlaps(rec);
-        if (clash.length && !confirm(`Cette date est déjà occupée par ${clash.map((o) => o.clientName).join(', ')}.\nEnregistrer quand même ?`)) return;
+        if (clash.length && !confirm(`Cette date est déjà occupée : ${clash.map((o) => `${CALENDARS[calOf(o)].icon} ${displayName(o)}`).join(', ')}.\nEnregistrer quand même ?`)) return;
         const i = state.reservations.findIndex((x) => x.id === rec.id);
         if (i >= 0) state.reservations[i] = rec; else state.reservations.push(rec);
+        if (!inView(rec)) { state.cal = 'all'; state.settings.cal = 'all'; } // sinon elle disparaîtrait de l'écran
         save();
         haptic();
         closeAllSheets();
         state.month = startOfMonth(parseKey(rec.start));
         render();
-        toast(existing ? 'Réservation modifiée' : (status === 'booked' ? 'Date réservée ✓' : 'Mise en attente ✓'));
+        const booked = rec.status === 'booked';
+        toast(existing ? 'Réservation modifiée'
+          : isWedding(rec) ? (booked ? 'Mariage confirmé 💍' : 'Mariage en attente ✓')
+            : (booked ? 'Date réservée ✓' : 'Mise en attente ✓'));
       };
-      form.addEventListener('submit', submit);
+
+      function bind() {
+        const form = formEl();
+
+        sheet.querySelector('#calPick').addEventListener('click', (e) => {
+          const b = e.target.closest('button');
+          if (!b || b.dataset.v === draft.cal) return;
+          collect();
+          if (b.dataset.v === 'wedding' && !draft.partner1 && !draft.partner2 && draft.clientName) draft.partner1 = draft.clientName;
+          if (b.dataset.v === 'booth' && coupleName(draft)) draft.clientName = coupleName(draft);
+          draft.cal = b.dataset.v;
+          haptic();
+          mount();
+        });
+
+        sheet.querySelector('#statusPick').addEventListener('click', (e) => {
+          const b = e.target.closest('button'); if (!b) return;
+          draft.status = b.dataset.v; haptic();
+          sheet.querySelectorAll('#statusPick button').forEach((x) => x.classList.toggle('on', x === b));
+        });
+
+        const chips = sheet.querySelector('#optChips');
+        if (chips) {
+          chips.addEventListener('click', (e) => {
+            const b = e.target.closest('button'); if (!b) return;
+            const o = b.dataset.opt;
+            draft.options = draft.options.includes(o) ? draft.options.filter((x) => x !== o) : [...draft.options, o];
+            b.classList.toggle('on', draft.options.includes(o));
+            haptic();
+          });
+        }
+
+        const stepList = sheet.querySelector('#stepList');
+        if (stepList) {
+          stepList.addEventListener('click', (e) => {
+            const b = e.target.closest('button'); if (!b) return;
+            const k = b.dataset.fstep;
+            draft.checklist[k] = !draft.checklist[k];
+            b.classList.toggle('done', draft.checklist[k]);
+            haptic();
+          });
+        }
+
+        const checkOverlap = () => {
+          const s = form.elements.start.value; const en = form.elements.end.value;
+          const warn = sheet.querySelector('#overlapWarn');
+          if (!s) { warn.innerHTML = ''; return; }
+          const others = overlaps({ id: draft.id, start: s, end: en && en >= s ? en : '' });
+          warn.innerHTML = others.length
+            ? `<div class="warn">⚠️ Date déjà prise : ${others.map((o) => `${CALENDARS[calOf(o)].icon} ${esc(displayName(o))} (${STATUS[o.status].label.toLowerCase()})`).join(', ')}</div>`
+            : '';
+        };
+        form.elements.start.addEventListener('change', checkOverlap);
+        form.elements.end.addEventListener('change', checkOverlap);
+        checkOverlap();
+
+        // Remplissage automatique des coordonnées d'un client existant
+        if (form.elements.clientName) {
+          form.elements.clientName.addEventListener('change', () => {
+            const c = allClients.find((x) => x.key === form.elements.clientName.value.trim().toLowerCase());
+            if (!c) return;
+            ['phone', 'email', 'address', 'company'].forEach((f) => { if (!form.elements[f].value && c[f]) form.elements[f].value = c[f]; });
+          });
+        }
+
+        form.addEventListener('submit', submit);
+      }
+
+      bind();
       sheet.querySelector('[data-submit]').addEventListener('click', submit);
-      entry.submit = submit;
     },
   });
 }
@@ -730,7 +1041,7 @@ function openForm({ id, date, status, prefill } = {}) {
 function deleteReservation(id) {
   const r = byId(id);
   if (!r) return;
-  if (!confirm(`Supprimer la réservation de ${r.clientName || 'ce client'} ?\nLa date redeviendra libre.`)) return;
+  if (!confirm(`Supprimer la réservation de ${displayName(r)} ?\nLa date redeviendra libre.`)) return;
   state.reservations = state.reservations.filter((x) => x.id !== id);
   save();
   closeAllSheets();
@@ -747,7 +1058,7 @@ function confirmReservation(id) {
   haptic();
   closeAllSheets();
   render();
-  toast('Location confirmée ✓');
+  toast(isWedding(r) ? 'Mariage confirmé 💍' : 'Location confirmée ✓');
 }
 
 async function shareOrDownload(filename, content, type) {
@@ -773,6 +1084,7 @@ function icsEscape(s) { return String(s || '').replace(/\\/g, '\\\\').replace(/\
 function exportIcs(id) {
   const r = byId(id);
   if (!r) return;
+  const wed = isWedding(r);
   const d = (k) => k.replace(/-/g, '');
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+/, '');
   let dtStart; let dtEnd;
@@ -785,41 +1097,60 @@ function exportIcs(id) {
     dtStart = `DTSTART;VALUE=DATE:${d(r.start)}`;
     dtEnd = `DTEND;VALUE=DATE:${d(addDays(endOf(r), 1))}`;
   }
+  const pendingTag = r.status === 'pending' ? '(En attente) ' : '';
+  const summary = wed
+    ? `💍 ${pendingTag}Mariage ${coupleName(r)} – Photobooth`
+    : `📸 ${pendingTag}Photobooth – ${r.clientName || ''}${r.eventType ? ` (${r.eventType})` : ''}`;
+  const location = wed ? [r.location, r.venueAddress].filter(Boolean).join(', ') : r.location;
   const desc = [
     `Statut : ${STATUS[r.status].label}`,
     r.phone && `Tél : ${r.phone}`,
     r.email && `Email : ${r.email}`,
+    wed && r.planner && `Organisateur : ${r.planner}${r.plannerPhone ? ` (${r.plannerPhone})` : ''}`,
+    r.guests && `Invités : ${r.guests}`,
     r.package && `Formule : ${r.package}`,
+    wed && (r.options || []).length && `Options : ${r.options.join(', ')}`,
+    wed && r.templateText && `Texte photo : ${r.templateText}`,
     r.price && `Prix : ${fmt.money(r.price)}`,
     r.notes,
   ].filter(Boolean).join('\n');
   const ics = [
     'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Booth Planner//FR', 'CALSCALE:GREGORIAN', 'BEGIN:VEVENT',
     `UID:${r.id}@boothplanner`, `DTSTAMP:${stamp}`, dtStart, dtEnd,
-    `SUMMARY:${icsEscape(`📸 ${r.status === 'pending' ? '(En attente) ' : ''}Photobooth – ${r.clientName || ''}${r.eventType ? ` (${r.eventType})` : ''}`)}`,
-    r.location ? `LOCATION:${icsEscape(r.location)}` : '',
+    `SUMMARY:${icsEscape(summary)}`,
+    location ? `LOCATION:${icsEscape(location)}` : '',
     `DESCRIPTION:${icsEscape(desc)}`,
     'END:VEVENT', 'END:VCALENDAR',
   ].filter(Boolean).join('\r\n');
-  shareOrDownload(`photobooth-${r.start}.ics`, ics, 'text/calendar');
+  shareOrDownload(`${wed ? 'mariage' : 'photobooth'}-${r.start}.ics`, ics, 'text/calendar');
 }
 
 function exportBackup() {
-  const payload = { app: 'booth-planner', version: 1, exportedAt: new Date().toISOString(), settings: state.settings, reservations: state.reservations };
+  const payload = { app: 'booth-planner', version: 2, exportedAt: new Date().toISOString(), settings: state.settings, reservations: state.reservations };
   shareOrDownload(`booth-planner-sauvegarde-${todayKey()}.json`, JSON.stringify(payload, null, 2), 'application/json');
 }
 
 function exportCsv() {
   const cols = [
-    ['start', 'Date début'], ['end', 'Date fin'], ['status', 'Statut'], ['clientName', 'Client'], ['company', 'Société'],
+    ['cal', 'Calendrier'], ['start', 'Date début'], ['end', 'Date fin'], ['status', 'Statut'], ['clientName', 'Client'],
+    ['partner1', 'Marié(e) 1'], ['partner2', 'Marié(e) 2'], ['company', 'Société'],
     ['phone', 'Téléphone'], ['email', 'Email'], ['address', 'Adresse'], ['eventType', 'Type'], ['location', 'Lieu'],
-    ['timeStart', 'Heure début'], ['timeEnd', 'Heure fin'], ['package', 'Formule'], ['guests', 'Invités'],
+    ['venueAddress', 'Adresse du lieu'], ['timeStart', 'Heure début'], ['timeEnd', 'Heure fin'], ['package', 'Formule'],
+    ['options', 'Options'], ['theme', 'Thème'], ['templateText', 'Texte photo'], ['guests', 'Invités'],
+    ['planner', 'Organisateur'], ['plannerPhone', 'Tél. organisateur'], ['checklist', 'Suivi'],
     ['price', 'Prix'], ['deposit', 'Acompte'], ['notes', 'Notes'],
   ];
+  const value = (r, k) => {
+    if (k === 'cal') return CALENDARS[calOf(r)].label;
+    if (k === 'status') return STATUS[r.status].label;
+    if (k === 'options') return (r.options || []).join(', ');
+    if (k === 'checklist') return isWedding(r) ? WEDDING_STEPS.filter(([s]) => (r.checklist || {})[s]).map(([, l]) => l).join(', ') : '';
+    return r[k];
+  };
   const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const lines = [cols.map(([, l]) => cell(l)).join(';')];
   sortByDate(state.reservations).forEach((r) => {
-    lines.push(cols.map(([k]) => cell(k === 'status' ? STATUS[r.status].label : r[k])).join(';'));
+    lines.push(cols.map(([k]) => cell(value(r, k))).join(';'));
   });
   shareOrDownload(`reservations-${todayKey()}.csv`, '\uFEFF' + lines.join('\r\n'), 'text/csv');
 }
@@ -834,10 +1165,13 @@ function importBackup(e) {
       const list = Array.isArray(data) ? data : data.reservations;
       if (!Array.isArray(list)) throw new Error('format');
       const valid = list.filter((r) => r && typeof r.start === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.start))
-        .map((r) => ({ ...r, id: r.id || uid(), status: r.status === 'booked' ? 'booked' : 'pending' }));
+        .map((r) => ({
+          ...r, id: r.id || uid(), status: r.status === 'booked' ? 'booked' : 'pending', cal: r.cal === 'wedding' ? 'wedding' : 'booth',
+        }));
       if (!confirm(`Restaurer ${valid.length} réservation(s) ?\nLes données actuelles seront remplacées.`)) return;
       state.reservations = valid;
       if (data.settings) Object.assign(state.settings, data.settings);
+      state.cal = CAL_MODES.includes(state.settings.cal) ? state.settings.cal : 'all';
       save(); render();
       toast('Sauvegarde restaurée ✓');
     } catch (err) {
@@ -854,7 +1188,7 @@ function openClient(key) {
   const tel = telHref(c.phone);
   const body = `
     <div class="detail-head">
-      <div class="avatar">${esc(initials(c.name))}</div>
+      ${avatarHTML(c)}
       <h3>${esc(c.name)}</h3>
       <p>${esc(c.company || `${c.reservations.length} réservation${c.reservations.length > 1 ? 's' : ''}`)}</p>
     </div>
@@ -866,10 +1200,10 @@ function openClient(key) {
     </div>
     <div class="group">
       ${[['Téléphone', c.phone], ['Email', c.email], ['Adresse', c.address], ['Total loué', c.total ? fmt.money(c.total) : '']]
-        .filter(([, v]) => v).map(([k, v]) => `<div class="row"><span class="k">${k}</span><span class="v">${esc(v)}</span></div>`).join('') || '<div class="row"><span class="k">Aucune coordonnée</span></div>'}
+    .filter(([, v]) => v).map(([k, v]) => `<div class="row"><span class="k">${k}</span><span class="v">${esc(v)}</span></div>`).join('') || '<div class="row"><span class="k">Aucune coordonnée</span></div>'}
     </div>
     <div class="group-title">Réservations</div>
-    ${sortByDate(c.reservations).reverse().map(cardHTML).join('')}
+    ${sortByDate(c.reservations).reverse().map((r) => cardHTML(r, true)).join('')}
     <button class="btn" data-new-client="${esc(c.key)}">${ICON.plus} Nouvelle réservation</button>
   `;
   openSheet({ title: '', right: '<button class="txt-btn r" data-close>OK</button>', body, full: true });
@@ -878,11 +1212,13 @@ function openClient(key) {
 /* ---------------- Délégation d'événements ---------------- */
 
 document.addEventListener('click', (e) => {
-  const t = e.target.closest('[data-tab],[data-act],[data-day],[data-open],[data-new-on],[data-edit],[data-delete],[data-confirm],[data-ics],[data-close],[data-client],[data-new-client]');
+  const t = e.target.closest('[data-tab],[data-act],[data-day],[data-open],[data-new-on],[data-edit],[data-delete],[data-confirm],[data-ics],[data-close],[data-client],[data-new-client],[data-setcal],[data-step]');
   if (!t) return;
   const d = t.dataset;
 
   if (d.tab) { state.tab = d.tab; closeAllSheets(); render(); window.scrollTo(0, 0); return; }
+  if (d.setcal) { setCal(d.setcal); return; }
+  if (d.step) { toggleStep(t, d.step); return; }
   if (d.day) { openDay(d.day); return; }
   if (d.open) { openDetail(d.open); return; }
   if (d.client) { openClient(d.client); return; }
@@ -890,10 +1226,14 @@ document.addEventListener('click', (e) => {
   if (d.delete) { deleteReservation(d.delete); return; }
   if (d.confirm) { confirmReservation(d.confirm); return; }
   if (d.ics) { exportIcs(d.ics); return; }
-  if (d.newOn) { openForm({ date: d.newOn, status: d.status }); return; }
+  if (d.newOn) { openForm({ date: d.newOn, status: d.status, cal: d.ncal }); return; }
   if (d.newClient !== undefined) {
     const c = clients().find((x) => x.key === d.newClient);
-    openForm({ prefill: c ? { clientName: c.name, phone: c.phone, email: c.email, address: c.address, company: c.company } : {} });
+    if (c && c.cal === 'wedding') {
+      openForm({ cal: 'wedding', prefill: { partner1: c.partner1, partner2: c.partner2, phone: c.phone, email: c.email, address: c.address } });
+    } else {
+      openForm({ cal: 'booth', prefill: c ? { clientName: c.name, phone: c.phone, email: c.email, address: c.address, company: c.company } : {} });
+    }
     return;
   }
   if (t.hasAttribute('data-close')) { closeSheet(sheets[sheets.length - 1]); return; }
@@ -902,12 +1242,15 @@ document.addEventListener('click', (e) => {
     case 'prev': shiftMonth(-1); break;
     case 'next': shiftMonth(1); break;
     case 'today': state.month = startOfMonth(new Date()); render(); break;
-    case 'new': openForm({ date: state.tab === 'calendar' && startOfMonth(new Date()).getTime() !== state.month.getTime() ? toKey(state.month) : todayKey() }); break;
+    case 'new': openForm({
+      date: state.tab === 'calendar' && startOfMonth(new Date()).getTime() !== state.month.getTime() ? toKey(state.month) : todayKey(),
+      cal: state.cal === 'wedding' ? 'wedding' : 'booth',
+    }); break;
     case 'export': exportBackup(); break;
     case 'csv': exportCsv(); break;
     case 'import': document.getElementById('importFile').click(); break;
     case 'wipe':
-      if (confirm('Effacer toutes les réservations ?\nCette action est irréversible.') && confirm('Vraiment tout effacer ?')) {
+      if (confirm('Effacer toutes les réservations (les deux calendriers) ?\nCette action est irréversible.') && confirm('Vraiment tout effacer ?')) {
         state.reservations = []; save(); render(); toast('Données effacées');
       }
       break;

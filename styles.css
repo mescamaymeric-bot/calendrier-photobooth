@@ -15,6 +15,9 @@
   --booked: #ef3d64;
   --booked-soft: rgba(239, 61, 100, 0.14);
   --danger: #ff3b30;
+  --c-booth: #7d6cf5;
+  --c-wedding: #c9922e;
+  --accent-shadow: rgba(108, 92, 231, 0.45);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
   --radius: 18px;
   --tabbar-h: 58px;
@@ -40,6 +43,9 @@
     --pending-soft: rgba(255, 179, 64, 0.18);
     --booked: #ff4f75;
     --booked-soft: rgba(255, 79, 117, 0.2);
+    --c-booth: #9b8cff;
+    --c-wedding: #e6b65c;
+    --accent-shadow: rgba(139, 125, 255, 0.4);
     --shadow: none;
   }
 }
@@ -197,7 +203,7 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
   position: fixed; right: 20px; bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 16px); z-index: 15;
   width: 58px; height: 58px; border-radius: 50%; display: grid; place-items: center; color: #fff;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  box-shadow: 0 10px 24px rgba(108, 92, 231, 0.45);
+  box-shadow: 0 10px 24px var(--accent-shadow);
 }
 .fab:active { transform: scale(0.93); }
 .fab svg { width: 28px; height: 28px; stroke-width: 2.4; }
@@ -332,3 +338,82 @@ svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width:
 @media (min-width: 700px) {
   .view { padding-top: 32px; }
 }
+
+/* =========================================================
+   Deux calendriers : 📸 Photobooth / 💍 Mariages
+   ========================================================= */
+
+/* Thème doré quand on affiche uniquement les mariages */
+body[data-mode="wedding"] {
+  --accent: #9a6a22;
+  --accent-2: #c99545;
+  --accent-soft: rgba(201, 149, 69, 0.15);
+  --accent-shadow: rgba(176, 125, 50, 0.4);
+}
+@media (prefers-color-scheme: dark) {
+  body[data-mode="wedding"] {
+    --accent: #e4b96c;
+    --accent-2: #c99545;
+    --accent-soft: rgba(228, 185, 108, 0.18);
+    --accent-shadow: rgba(228, 185, 108, 0.3);
+  }
+  /* texte foncé sur l'or clair, plus lisible que le blanc */
+  body[data-mode="wedding"] .btn:not(.secondary):not(.danger),
+  body[data-mode="wedding"] .fab { color: #24190a; }
+}
+
+.calswitch { margin-bottom: 14px; }
+.calswitch button { font-size: 13.5px; white-space: nowrap; }
+.calswitch button.on { color: var(--accent); }
+
+/* Pastilles sous le numéro du jour */
+.day .marks { position: absolute; bottom: 5px; left: 0; right: 0; display: flex; justify-content: center; gap: 3px; }
+.mk { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex: 0 0 auto; }
+.mk.cur { background: currentColor; opacity: 0.85; }
+.mk.booth { background: var(--c-booth); }
+.mk.wedding { background: var(--c-wedding); }
+.mk.other { background: transparent; box-shadow: inset 0 0 0 1.5px var(--muted); }
+.day.booked .mk.booth, .day.booked .mk.wedding { box-shadow: 0 0 0 1.5px #fff; }
+.day.booked .mk.other { box-shadow: inset 0 0 0 1.5px #fff; }
+.legend.cals { margin-top: 2px; }
+.legend.cals .mk { width: 8px; height: 8px; }
+
+.cal-ic { margin-right: 5px; }
+
+.avatar.wed { background: linear-gradient(135deg, #f3d9a4, #c99545); font-size: 22px; }
+.detail-head .avatar.wed { font-size: 34px; }
+.badges { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
+.badge.count { background: var(--accent-soft); color: var(--accent); }
+.badge.count::before { display: none; }
+
+/* Choix du calendrier dans le formulaire */
+.cal-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.cal-pick button {
+  height: 50px; border-radius: 15px; background: var(--card); box-shadow: var(--shadow);
+  font-weight: 700; font-size: 16px; color: var(--muted);
+}
+.cal-pick button[data-v="booth"].on { color: var(--c-booth); box-shadow: inset 0 0 0 2px var(--c-booth); background: rgba(125, 108, 245, 0.1); }
+.cal-pick button[data-v="wedding"].on { color: var(--c-wedding); box-shadow: inset 0 0 0 2px var(--c-wedding); background: rgba(201, 146, 46, 0.12); }
+
+/* Options (puces à cocher) */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+.chips.in-group { padding: 12px 16px 14px; margin: 0; border-top: 0.5px solid var(--line); }
+.chip {
+  padding: 9px 13px; border-radius: 999px; font-size: 14px; font-weight: 600;
+  background: var(--card); color: var(--muted); box-shadow: var(--shadow), inset 0 0 0 1px var(--line);
+}
+.chip.on { background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.chips.in-group .chip { padding: 6px 11px; font-size: 13px; }
+
+/* Suivi d'un mariage (étapes à cocher) */
+.row.step { width: 100%; justify-content: flex-start; align-items: center; gap: 12px; text-align: left; }
+.row.step:active { background: var(--card-2); }
+.tick {
+  width: 26px; height: 26px; border-radius: 50%; flex: 0 0 auto; display: grid; place-items: center;
+  box-shadow: inset 0 0 0 2px var(--line); color: #fff;
+}
+.tick svg { width: 16px; height: 16px; stroke-width: 3; opacity: 0; }
+.row.step.done .tick { background: linear-gradient(135deg, var(--c-wedding), #e8c27a); box-shadow: none; }
+.row.step.done .tick svg { opacity: 1; }
+.row.step.done span:last-child { color: var(--muted); }
+.progress.top { margin: 14px 16px 4px; }

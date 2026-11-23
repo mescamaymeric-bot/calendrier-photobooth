@@ -1,7 +1,7 @@
 {
   "name": "Booth Planner",
   "short_name": "Booth Planner",
-  "description": "Gestion des réservations de photobooth",
+  "description": "Réservations de photobooth et de mariages",
   "lang": "fr",
   "start_url": "./",
   "scope": "./",
