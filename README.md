@@ -37,6 +37,12 @@ développeur Apple.
 
 ## 💍 Calendrier Mariages
 
+- **Étapes** à la place de « En attente / Loué » :
+  📩 Demande reçue → 📝 Devis envoyé → ✍️ Devis signé → 💶 Acompte reçu →
+  💍 Mariage validé. Les deux premières apparaissent en orange dans le
+  calendrier (en attente), les suivantes en rouge (date réservée). On
+  change d'étape d'un geste depuis la fiche (« Passer à … » ou en touchant
+  l'étape voulue).
 - **Fiche mariage** : les deux mariés, téléphone, email, adresse ; lieu de
   réception et son adresse, nombre d'invités, organisateur / wedding
   planner et son téléphone ; formule, thème / couleurs, texte à mettre sur
@@ -44,27 +50,27 @@ développeur Apple.
 - **Options** à cocher : impressions illimitées, livre d'or, template
   prénoms + date, fond personnalisé, accessoires, galerie en ligne / QR
   code, GIF / Boomerang, installation la veille.
-- **Suivi** à cocher directement depuis la fiche : devis envoyé, contrat
-  signé, acompte reçu, template validé par les mariés, solde réglé (avec
-  barre de progression).
+- **À faire** : template photo validé par les mariés, solde réglé.
 - **Compte à rebours** avant le jour J (« J-42 »), SMS de relance adapté
   aux mariés, itinéraire vers le lieu de réception.
 - Thème doré quand seul le calendrier Mariages est affiché.
 
 ### Les deux calendriers ensemble
 
+- **Une location et un mariage peuvent avoir lieu le même jour** : la
+  fiche du jour propose d'ajouter l'un ou l'autre indépendamment.
+- L'alerte de double réservation ne concerne que le **même** calendrier
+  (deux locations, ou deux mariages, le même jour).
 - **Tous** : les deux calendriers dans la même vue. Une pastille violette
   = Photobooth, dorée = Mariage.
-- **📸 Photobooth** ou **💍 Mariages** seul : les jours déjà pris dans
-  l'autre calendrier sont marqués d'un petit rond vide, et la fiche du jour
-  l'indique (« Déjà pris côté 📸 Photobooth »).
-- Les doubles réservations sont vérifiées **sur les deux calendriers**
-  (c'est le même photobooth) : alerte si la date est déjà prise.
+- **📸 Photobooth** ou **💍 Mariages** seul : les jours où l'autre
+  calendrier a une réservation sont marqués d'un petit rond vide, pour
+  information.
 - Une réservation peut changer de calendrier (choix « Calendrier » en haut
-  du formulaire), par exemple pour ranger dans Mariages un ancien
-  événement de type « Mariage ».
-- Les réservations existantes (avant cette version) sont automatiquement
-  dans le calendrier 📸 Photobooth : rien n'est perdu à la mise à jour.
+  du formulaire).
+- Les réservations enregistrées avec une version précédente sont reprises
+  telles quelles (les mariages reçoivent automatiquement l'étape
+  correspondante).
 
 ## Confidentialité
 
