@@ -1,6 +1,6 @@
 // Service worker : permet à l'appli de fonctionner sans connexion.
 // Incrémentez VERSION à chaque mise à jour des fichiers.
-const VERSION = 'booth-planner-v3';
+const VERSION = 'booth-planner-v4';
 const FILES = [
   './',
   './index.html',

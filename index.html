@@ -2,6 +2,11 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8">
+  <!-- Politique de sécurité : seul le code de l'appli peut s'exécuter, et
+       l'appli ne peut se connecter à aucun autre site (rien ne peut sortir). -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; manifest-src 'self'; worker-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex, nofollow">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <title>Booth Planner</title>
   <meta name="description" content="Réservations de photobooth et de mariages">
