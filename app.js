@@ -69,17 +69,74 @@ const state = {
 
 /* ---------------- Storage ---------------- */
 
+const DEFAULT_SETTINGS = { company: 'Mon Photobooth', cal: 'all' };
+
+// Validation stricte de tout ce qui est lu (stockage ou fichier de
+// sauvegarde) : seuls les champs connus sont gardés, avec une longueur
+// maximale. Un fichier piégé ou corrompu ne peut donc rien injecter.
+const TEXT_FIELDS = {
+  clientName: 300, company: 200, phone: 60, email: 200, address: 500, eventType: 100, location: 300,
+  venueAddress: 500, package: 200, guests: 12, price: 20, deposit: 20, notes: 20000,
+  partner1: 150, partner2: 150, planner: 200, plannerPhone: 60, theme: 300, templateText: 300,
+};
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/; // caractères sûrs uniquement
+const CHECKLIST_KEYS = ['quote', 'contract', 'depositPaid', 'template', 'balance'];
+
+function cleanReservation(raw) {
+  if (!raw || typeof raw !== 'object' || typeof raw.start !== 'string' || !DATE_RE.test(raw.start)) return null;
+  const r = {
+    id: typeof raw.id === 'string' && ID_RE.test(raw.id) ? raw.id : uid(),
+    cal: raw.cal === 'wedding' ? 'wedding' : 'booth',
+    status: raw.status === 'booked' ? 'booked' : 'pending',
+    start: raw.start,
+    end: typeof raw.end === 'string' && DATE_RE.test(raw.end) && raw.end > raw.start ? raw.end : '',
+    options: Array.isArray(raw.options) ? raw.options.filter((o) => WEDDING_OPTIONS.includes(o)) : [],
+    checklist: {},
+  };
+  if (WEDDING_STAGES.some((st) => st.key === raw.stage)) r.stage = raw.stage;
+  Object.entries(TEXT_FIELDS).forEach(([f, max]) => {
+    if (raw[f] !== undefined && raw[f] !== null && raw[f] !== '') r[f] = String(raw[f]).slice(0, max);
+  });
+  ['timeStart', 'timeEnd'].forEach((f) => { if (typeof raw[f] === 'string' && TIME_RE.test(raw[f])) r[f] = raw[f]; });
+  if (raw.checklist && typeof raw.checklist === 'object') {
+    CHECKLIST_KEYS.forEach((k) => { if (raw.checklist[k] === true) r.checklist[k] = true; });
+  }
+  ['createdAt', 'updatedAt'].forEach((f) => { if (typeof raw[f] === 'string' && raw[f].length <= 40) r[f] = raw[f]; });
+  return normalize(r);
+}
+
+function cleanList(list) {
+  const seen = new Set();
+  return (Array.isArray(list) ? list : []).map(cleanReservation).filter(Boolean).map((r) => {
+    if (seen.has(r.id)) r.id = uid();
+    seen.add(r.id);
+    return r;
+  });
+}
+
+function cleanSettings(raw) {
+  const out = { ...DEFAULT_SETTINGS };
+  if (raw && typeof raw === 'object') {
+    if (typeof raw.company === 'string' && raw.company.trim()) out.company = raw.company.trim().slice(0, 80);
+    if (CAL_MODES.includes(raw.cal)) out.cal = raw.cal;
+  }
+  return out;
+}
+
+function applyPayload(p) {
+  state.reservations = cleanList(p && p.reservations);
+  state.settings = cleanSettings(p && p.settings);
+  state.cal = state.settings.cal;
+}
+
+function readJSON(key) {
+  try { return JSON.parse(localStorage.getItem(key)); } catch (e) { return null; }
+}
+
 function load() {
-  try {
-    const raw = localStorage.getItem(STORE_KEY);
-    if (raw) state.reservations = JSON.parse(raw) || [];
-  } catch (e) { state.reservations = []; }
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) Object.assign(state.settings, JSON.parse(raw));
-  } catch (e) { /* valeurs par défaut */ }
-  state.cal = CAL_MODES.includes(state.settings.cal) ? state.settings.cal : 'all';
-  state.reservations.forEach(normalize);
+  applyPayload({ reservations: readJSON(STORE_KEY), settings: readJSON(SETTINGS_KEY) });
 }
 
 // Un mariage a toujours une étape, et son statut (couleur) en découle.
@@ -91,13 +148,327 @@ function normalize(r) {
   return r;
 }
 
+/* ---------- Verrouillage par code et chiffrement ----------
+   Quand le verrouillage est activé, rien n'est plus stocké en clair :
+   réservations et réglages sont chiffrés en AES-GCM 256 bits, avec une clé
+   dérivée du code par PBKDF2-SHA-256 (600 000 itérations, sel aléatoire).
+   La clé n'existe qu'en mémoire, pendant que l'appli est déverrouillée. */
+
+const VAULT_KEY = 'boothplanner.vault.v1';
+const LOCK_STATE_KEY = 'boothplanner.lockstate.v1';
+const KDF_ITERATIONS = 600000;
+const CODE_LENGTH = 6;
+const AUTO_LOCK_MS = 60 * 1000;
+const VAULT_AAD = new TextEncoder().encode('boothplanner.vault.v1');
+const vault = { key: null, salt: null, iter: KDF_ITERATIONS };
+
+const cryptoOK = () => !!(window.isSecureContext && window.crypto && crypto.subtle);
+const hasVault = () => { try { return localStorage.getItem(VAULT_KEY) !== null; } catch (e) { return false; } };
+const isLocked = () => hasVault() && !vault.key;
+
+function toB64(buf) {
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function fromB64(str) {
+  const bin = atob(str);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function validBox(b) {
+  return !!b && b.v === 1 && Number.isInteger(b.iter) && b.iter >= 100000 && b.iter <= 5000000
+    && typeof b.salt === 'string' && b.salt.length <= 64 && typeof b.iv === 'string' && b.iv.length <= 32 && typeof b.ct === 'string';
+}
+async function deriveKey(code, salt, iter) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(code), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter },
+    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'],
+  );
+}
+async function sealBox(key, salt, iter, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: VAULT_AAD }, key, new TextEncoder().encode(JSON.stringify(obj)));
+  return { v: 1, kdf: 'PBKDF2-SHA256', iter, salt: toB64(salt), iv: toB64(iv), ct: toB64(ct) };
+}
+async function openBox(key, box) {
+  if (!validBox(box)) throw new Error('format');
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(box.iv), additionalData: VAULT_AAD }, key, fromB64(box.ct));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+
+// Les écritures chiffrées sont mises en file pour garder leur ordre.
+let saveChain = Promise.resolve();
 function save() {
+  if (hasVault()) {
+    if (!vault.key) return saveChain; // verrouillé : on n'écrit jamais rien, et surtout rien en clair
+    const snapshot = JSON.parse(JSON.stringify({ reservations: state.reservations, settings: state.settings }));
+    const { key, salt, iter } = vault;
+    saveChain = saveChain
+      .then(() => sealBox(key, salt, iter, snapshot))
+      .then((box) => localStorage.setItem(VAULT_KEY, JSON.stringify(box)))
+      .catch(() => toast('⚠️ Impossible d\'enregistrer'));
+    return saveChain;
+  }
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(state.reservations));
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
   } catch (e) {
     toast('⚠️ Impossible d\'enregistrer');
   }
+  return saveChain;
+}
+
+// Anti-essais à répétition : après 5 erreurs, attente de 30 s, puis
+// doublée à chaque nouvelle erreur (15 min au maximum).
+function lockState() {
+  const st = readJSON(LOCK_STATE_KEY);
+  return st && Number.isFinite(st.fails) && Number.isFinite(st.until) ? st : { fails: 0, until: 0 };
+}
+function registerFail() {
+  const st = lockState();
+  st.fails += 1;
+  if (st.fails >= 5) st.until = Date.now() + Math.min(15 * 60000, 30000 * 2 ** (st.fails - 5));
+  try { localStorage.setItem(LOCK_STATE_KEY, JSON.stringify(st)); } catch (e) { /* rien */ }
+  return st;
+}
+function resetFails() { try { localStorage.removeItem(LOCK_STATE_KEY); } catch (e) { /* rien */ } }
+function throttleLeft() { return Math.max(0, lockState().until - Date.now()); }
+function fmtWait(ms) { const sec = Math.ceil(ms / 1000); return sec >= 60 ? `${Math.ceil(sec / 60)} min` : `${sec} s`; }
+
+function weakCode(c) {
+  if (/^(\d)\1+$/.test(c)) return 'Code trop simple (chiffres identiques)';
+  const d = c.split('').map(Number);
+  const step = (k) => d.every((x, i) => i === 0 || x === (d[i - 1] + k) % 10);
+  if (step(1) || step(9)) return 'Code trop simple (suite de chiffres)';
+  if (/^(\d\d)\1\1$/.test(c) || /^(\d{3})\1$/.test(c)) return 'Code trop simple (motif répété)';
+  return null;
+}
+
+// Écran de saisie d'un code (plein écran, pavé numérique). Résout avec le
+// code quand `validate` l'accepte (retourne null), ou null si annulé.
+function askCode({ title, subtitle, cancellable = true, forgot = false, validate }) {
+  return new Promise((resolve) => {
+    const el = document.createElement('div');
+    el.className = 'lock';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-modal', 'true');
+    el.innerHTML = `
+      <div class="lock-inner">
+        <img class="lock-icon" src="icons/icon-192.png" alt="">
+        <h2>${esc(title)}</h2>
+        <p class="lock-sub">${esc(subtitle)}</p>
+        <div class="pin-dots" aria-hidden="true">${'<i></i>'.repeat(CODE_LENGTH)}</div>
+        <p class="lock-err" role="status" aria-live="assertive"></p>
+        <div class="pin-pad">
+          ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => `<button type="button" data-pin="${n}">${n}</button>`).join('')}
+          ${cancellable ? '<button type="button" class="pin-ghost" data-pin-cancel>Annuler</button>' : '<span></span>'}
+          <button type="button" data-pin="0">0</button>
+          <button type="button" class="pin-ghost" data-pin="del" aria-label="Effacer">${ICON.backspace}</button>
+        </div>
+        ${forgot ? '<button type="button" class="lock-link" data-pin-forgot>Code oublié ?</button>' : ''}
+      </div>`;
+    document.body.append(el);
+
+    let code = '';
+    let busy = false;
+    const dotsBox = el.querySelector('.pin-dots');
+    const dots = el.querySelectorAll('.pin-dots i');
+    const err = el.querySelector('.lock-err');
+    const paint = () => dots.forEach((dot, i) => dot.classList.toggle('on', i < code.length));
+    const onKey = (e) => {
+      if (/^\d$/.test(e.key)) press(e.key);
+      else if (e.key === 'Backspace') press('del');
+      else if (e.key === 'Escape' && cancellable) close(null);
+    };
+    function close(value) {
+      document.removeEventListener('keydown', onKey);
+      el.remove();
+      resolve(value);
+    }
+    el.cancel = () => close(null);
+    async function submit() {
+      busy = true;
+      el.classList.add('busy');
+      err.textContent = 'Vérification…';
+      let msg;
+      try { msg = validate ? await validate(code) : null; } catch (e) { msg = 'Erreur, réessayez'; }
+      busy = false;
+      el.classList.remove('busy');
+      if (!msg) { close(code); return; }
+      err.textContent = msg;
+      code = '';
+      paint();
+      dotsBox.classList.remove('shake');
+      void dotsBox.offsetWidth; // relance l'animation
+      dotsBox.classList.add('shake');
+      haptic();
+    }
+    function press(k) {
+      if (busy) return;
+      if (k === 'del') { code = code.slice(0, -1); paint(); return; }
+      if (code.length >= CODE_LENGTH) return;
+      code += k;
+      err.textContent = '';
+      paint();
+      if (code.length === CODE_LENGTH) setTimeout(submit, 120);
+    }
+    el.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pin],[data-pin-cancel],[data-pin-forgot]');
+      if (!b) return;
+      if (b.hasAttribute('data-pin-cancel')) { close(null); return; }
+      if (b.hasAttribute('data-pin-forgot')) {
+        if (confirm('Code oublié ?\n\nVos données sont chiffrées : sans le code, personne ne peut les lire.\n\nLa seule solution est de TOUT EFFACER sur cet iPhone, puis de restaurer une sauvegarde (Réglages → Restaurer une sauvegarde).')
+          && confirm('Effacer définitivement toutes les données de l\'appli sur cet iPhone ?')) {
+          wipeEverything();
+          close(null);
+        }
+        return;
+      }
+      press(b.dataset.pin);
+    });
+    document.addEventListener('keydown', onKey);
+  });
+}
+
+function wipeEverything() {
+  [VAULT_KEY, LOCK_STATE_KEY, STORE_KEY, SETTINGS_KEY].forEach((k) => { try { localStorage.removeItem(k); } catch (e) { /* rien */ } });
+  vault.key = null;
+  vault.salt = null;
+}
+
+async function tryUnlock(code) {
+  const wait = throttleLeft();
+  if (wait) return `Trop d'essais. Réessayez dans ${fmtWait(wait)}.`;
+  const box = readJSON(VAULT_KEY);
+  if (!validBox(box)) return 'Données illisibles. Utilisez « Code oublié ».';
+  try {
+    const salt = fromB64(box.salt);
+    const key = await deriveKey(code, salt, box.iter);
+    const payload = await openBox(key, box);
+    Object.assign(vault, { key, salt, iter: box.iter });
+    applyPayload(payload);
+    resetFails();
+    return null;
+  } catch (e) {
+    const st = registerFail();
+    return st.until > Date.now() ? `Code incorrect. Trop d'essais : attendez ${fmtWait(st.until - Date.now())}.` : 'Code incorrect';
+  }
+}
+
+let lockOpen = false;
+async function showLock() {
+  if (lockOpen) return;
+  lockOpen = true;
+  document.querySelectorAll('.lock').forEach((n) => n.cancel && n.cancel());
+  closeAllSheets();
+  view.innerHTML = '';
+  document.body.classList.add('is-locked');
+  const code = await askCode({
+    title: 'Booth Planner', subtitle: 'Entrez votre code pour ouvrir l\'appli', cancellable: false, forgot: true, validate: tryUnlock,
+  });
+  document.body.classList.remove('is-locked');
+  lockOpen = false;
+  if (code === null) load(); // « Code oublié » : tout a été effacé
+  render();
+}
+
+function lockNow() {
+  if (!vault.key) return;
+  vault.key = null;
+  vault.salt = null;
+  state.reservations = [];
+  state.settings = { ...DEFAULT_SETTINGS };
+  showLock();
+}
+
+function confirmCurrentCode(title) {
+  return askCode({
+    title,
+    subtitle: 'Entrez votre code actuel',
+    validate: async (c) => {
+      const wait = throttleLeft();
+      if (wait) return `Trop d'essais. Réessayez dans ${fmtWait(wait)}.`;
+      const box = readJSON(VAULT_KEY);
+      try {
+        await openBox(await deriveKey(c, fromB64(box.salt), box.iter), box);
+        resetFails();
+        return null;
+      } catch (e) {
+        registerFail();
+        return 'Code incorrect';
+      }
+    },
+  });
+}
+
+async function chooseNewCode() {
+  const code = await askCode({ title: 'Choisissez un code', subtitle: `${CODE_LENGTH} chiffres que vous seul connaissez`, validate: weakCode });
+  if (!code) return null;
+  const again = await askCode({
+    title: 'Confirmez le code', subtitle: 'Tapez-le une seconde fois', validate: (c) => (c === code ? null : 'Les deux codes ne correspondent pas'),
+  });
+  return again ? code : null;
+}
+
+async function setVaultCode(code) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveKey(code, salt, KDF_ITERATIONS);
+  const box = await sealBox(key, salt, KDF_ITERATIONS, { reservations: state.reservations, settings: state.settings });
+  await saveChain;
+  localStorage.setItem(VAULT_KEY, JSON.stringify(box)); // d'abord le coffre…
+  Object.assign(vault, { key, salt, iter: KDF_ITERATIONS });
+  localStorage.removeItem(STORE_KEY); // …ensuite seulement on efface la version en clair
+  localStorage.removeItem(SETTINGS_KEY);
+  resetFails();
+}
+
+async function enableLock() {
+  if (!cryptoOK()) { toast('Verrouillage indisponible sur cette page'); return; }
+  if (!confirm(`Protéger l'appli par un code à ${CODE_LENGTH} chiffres ?\n\nVos données seront chiffrées sur l'iPhone. Sans le code, elles seront IRRÉCUPÉRABLES : exportez d'abord une sauvegarde.`)) return;
+  const code = await chooseNewCode();
+  if (!code) return;
+  try {
+    await setVaultCode(code);
+    toast('🔒 Appli protégée par code');
+  } catch (e) {
+    toast('⚠️ Échec du verrouillage');
+  }
+  render();
+}
+
+async function changeLockCode() {
+  if (!(await confirmCurrentCode('Changer le code'))) return;
+  const code = await chooseNewCode();
+  if (!code) return;
+  try {
+    await setVaultCode(code);
+    toast('🔑 Nouveau code enregistré');
+  } catch (e) {
+    toast('⚠️ Échec du changement de code');
+  }
+  render();
+}
+
+async function disableLock() {
+  if (!(await confirmCurrentCode('Désactiver le verrouillage'))) return;
+  if (!confirm('Désactiver le verrouillage ?\nVos données seront de nouveau stockées en clair sur l\'iPhone.')) return;
+  await saveChain;
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify(state.reservations)); // d'abord la version en clair…
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(state.settings));
+    localStorage.removeItem(VAULT_KEY); // …ensuite on supprime le coffre
+    vault.key = null;
+    vault.salt = null;
+    resetFails();
+    toast('Verrouillage désactivé');
+  } catch (e) {
+    toast('⚠️ Échec');
+  }
+  render();
 }
 
 function setCal(mode) {
@@ -243,6 +614,10 @@ const ICON = {
   upload: '<svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>',
   download: '<svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>',
   table: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 10h18M9 10v10"/></svg>',
+  lock: '<svg viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10.5" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg>',
+  unlock: '<svg viewBox="0 0 24 24"><rect x="4.5" y="10.5" width="15" height="10.5" rx="2.5"/><path d="M8 10.5V7.5a4 4 0 0 1 7.6-1.7"/></svg>',
+  key: '<svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l2.5 2.5M14 9l2 2"/></svg>',
+  backspace: '<svg viewBox="0 0 24 24"><path d="M21 5H9l-6 7 6 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1z"/><path d="M17 9l-6 6M11 9l6 6"/></svg>',
 };
 
 /* ---------------- Rendering: tabs ---------------- */
@@ -250,6 +625,7 @@ const ICON = {
 const view = document.getElementById('view');
 
 function render() {
+  if (isLocked()) return;
   document.body.dataset.mode = state.cal; // thème doré en mode Mariages
   document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.tab === state.tab));
   if (state.tab === 'calendar') renderCalendar();
@@ -386,7 +762,7 @@ function cardHTML(r, showIcon = state.cal === 'all' || !inView(r)) {
     : [r.eventType, r.location, r.timeStart];
   const sub = parts.filter(Boolean).join(' · ') || (multi ? `Jusqu'au ${fmt.short(r.end)}` : fmt.weekday(r.start));
   const icon = showIcon ? `<span class="cal-ic">${CALENDARS[calOf(r)].icon}</span>` : '';
-  return `<button class="card" data-open="${r.id}">
+  return `<button class="card" data-open="${esc(r.id)}">
     <div class="datebox ${st.cls}"><span class="d">${parseKey(r.start).getDate()}</span><span class="m">${esc(fmt.monthShort(r.start))}</span></div>
     <div class="main">
       <div class="name">${icon}${esc(displayName(r))}</div>
@@ -510,6 +886,24 @@ function renderSettings() {
   const nWedding = state.reservations.filter(isWedding).length;
   const nBooth = state.reservations.length - nWedding;
   const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+  const locked = !!vault.key;
+  const security = locked ? `
+      <button class="setting-row" data-act="lock-now">
+        <span class="ic" style="background:#1d1d1f">${ICON.lock}</span>
+        <span class="t">Verrouiller maintenant<small>Se verrouille aussi seule après 1 min hors de l'appli</small></span>
+      </button>
+      <button class="setting-row" data-act="lock-change">
+        <span class="ic" style="background:#8e8e93">${ICON.key}</span>
+        <span class="t">Changer le code</span>
+      </button>
+      <button class="setting-row danger" data-act="lock-off">
+        <span class="ic" style="background:#ff3b30">${ICON.unlock}</span>
+        <span class="t">Désactiver le verrouillage</span>
+      </button>` : `
+      <button class="setting-row" data-act="lock-on">
+        <span class="ic" style="background:#1d1d1f">${ICON.lock}</span>
+        <span class="t">Protéger l'appli par un code<small>Code à ${CODE_LENGTH} chiffres · données chiffrées sur l'iPhone</small></span>
+      </button>`;
 
   view.innerHTML = `
     <header class="header"><div><div class="eyebrow">Booth Planner</div><h1 class="title">Réglages</h1></div></header>
@@ -525,11 +919,19 @@ function renderSettings() {
       <div class="field"><label for="company">Nom</label><input id="company" value="${esc(state.settings.company)}" placeholder="Mon Photobooth"></div>
     </div>
 
+    <div class="group-title">Sécurité</div>
+    <div class="group">${security}
+    </div>
+    <p class="hint">${locked
+    ? '🔐 Vos réservations sont chiffrées sur cet iPhone, et vos sauvegardes aussi. Sans le code, elles sont illisibles : ne l\'oubliez pas.'
+    : 'Conseillé : sans code, toute personne qui a votre iPhone déverrouillé en main peut ouvrir l\'appli.'}
+    Booth Planner n'a ni compte, ni serveur, ni espace « admin » en ligne : rien n'est envoyé sur Internet.</p>
+
     <div class="group-title">Sauvegarde</div>
     <div class="group">
       <button class="setting-row" data-act="export">
         <span class="ic" style="background:#6c5ce7">${ICON.upload}</span>
-        <span class="t">Exporter une sauvegarde<small>Fichier .json à garder dans Fichiers / iCloud</small></span>
+        <span class="t">Exporter une sauvegarde<small>${locked ? 'Fichier chiffré avec votre code' : 'Fichier .json à garder dans Fichiers / iCloud'}</small></span>
       </button>
       <button class="setting-row" data-act="import">
         <span class="ic" style="background:#0a84ff">${ICON.download}</span>
@@ -537,7 +939,7 @@ function renderSettings() {
       </button>
       <button class="setting-row" data-act="csv">
         <span class="ic" style="background:#30b158">${ICON.table}</span>
-        <span class="t">Exporter en tableau (CSV)<small>Pour Excel / Numbers / compta</small></span>
+        <span class="t">Exporter en tableau (CSV)<small>Pour Excel / Numbers / compta${locked ? ' · fichier non chiffré' : ''}</small></span>
       </button>
       <button class="setting-row danger" data-act="wipe">
         <span class="ic" style="background:#ff3b30">${ICON.trash}</span>
@@ -553,12 +955,12 @@ function renderSettings() {
 3. Choisissez <b>« Sur l'écran d'accueil »</b>.
 L'appli s'ouvrira alors en plein écran, comme une app de l'App Store, même sans connexion.</div></div>`}
 
-    <div class="brand"><img src="icons/icon-192.png" alt="">Booth Planner · v2.1</div>
+    <div class="brand"><img src="icons/icon-192.png" alt="">Booth Planner · v3.0</div>
     <input type="file" id="importFile" accept="application/json,.json" hidden>
   `;
 
   document.getElementById('company').addEventListener('change', (e) => {
-    state.settings.company = e.target.value.trim() || 'Mon Photobooth';
+    state.settings.company = e.target.value.trim().slice(0, 80) || 'Mon Photobooth';
     save(); toast('Nom enregistré');
   });
   document.getElementById('importFile').addEventListener('change', importBackup);
@@ -715,9 +1117,9 @@ function detailHTML(r) {
   let nextAction = '';
   if (wed) {
     const next = WEDDING_STAGES[WEDDING_STAGES.findIndex((st) => st.key === stageOf(r)) + 1];
-    if (next) nextAction = `<button class="btn" data-setstage="${r.id}|${next.key}" style="margin:0 0 16px">${next.icon} Passer à « ${next.label} »</button>`;
+    if (next) nextAction = `<button class="btn" data-setstage="${esc(r.id)}|${next.key}" style="margin:0 0 16px">${next.icon} Passer à « ${next.label} »</button>`;
   } else if (r.status === 'pending') {
-    nextAction = `<button class="btn" data-confirm="${r.id}" style="margin:0 0 16px">${ICON.check} Confirmer la location</button>`;
+    nextAction = `<button class="btn" data-confirm="${esc(r.id)}" style="margin:0 0 16px">${ICON.check} Confirmer la location</button>`;
   }
 
   const rows = (items) => items.filter(([, v]) => v).map(([k, v, cls]) => `<div class="row"><span class="k">${k}</span><span class="v ${cls || ''}">${v}</span></div>`).join('');
@@ -746,12 +1148,12 @@ function detailHTML(r) {
     sections = `
       <div class="group-title">Avancement</div>
       <div class="group stage-list">
-        ${WEDDING_STAGES.map((st, i) => `<button class="row stage-row ${st.status} ${i < idx ? 'past' : ''} ${i === idx ? 'on' : ''}" data-setstage="${r.id}|${st.key}">
+        ${WEDDING_STAGES.map((st, i) => `<button class="row stage-row ${st.status} ${i < idx ? 'past' : ''} ${i === idx ? 'on' : ''}" data-setstage="${esc(r.id)}|${st.key}">
           <span class="st-ic">${st.icon}</span><span class="st-label">${st.label}</span><span class="radio">${ICON.check}</span></button>`).join('')}
       </div>
       <div class="group-title">À faire</div>
       <div class="group">
-        ${WEDDING_TODOS.map(([k, l]) => `<button class="row step ${todos[k] ? 'done' : ''}" data-step="${r.id}|${k}"><span class="tick">${ICON.check}</span><span>${l}</span></button>`).join('')}
+        ${WEDDING_TODOS.map(([k, l]) => `<button class="row step ${todos[k] ? 'done' : ''}" data-step="${esc(r.id)}|${k}"><span class="tick">${ICON.check}</span><span>${l}</span></button>`).join('')}
       </div>
       ${group('Mariage', [
     ['Date', esc(rangeLabel(r))],
@@ -819,8 +1221,8 @@ function detailHTML(r) {
 
     ${r.notes ? `<div class="group-title">Notes</div><div class="group"><div class="notes">${esc(r.notes)}</div></div>` : ''}
 
-    <button class="btn secondary" data-ics="${r.id}">${ICON.cal} Ajouter à mon calendrier</button>
-    <button class="btn danger" data-delete="${r.id}">${ICON.trash} Supprimer (remettre libre)</button>
+    <button class="btn secondary" data-ics="${esc(r.id)}">${ICON.cal} Ajouter à mon calendrier</button>
+    <button class="btn danger" data-delete="${esc(r.id)}">${ICON.trash} Supprimer (remettre libre)</button>
   `;
 }
 
@@ -830,7 +1232,7 @@ function openDetail(id) {
   openSheet({
     title: '',
     left: '<button class="txt-btn" data-close>Fermer</button>',
-    right: `<button class="txt-btn r" data-edit="${r.id}">Modifier</button>`,
+    right: `<button class="txt-btn r" data-edit="${esc(r.id)}">Modifier</button>`,
     body: detailHTML(r),
     full: true,
   });
@@ -981,7 +1383,7 @@ function formHTML(r, allClients, existing) {
       </div>
 
       <button class="btn" type="submit">${ICON.check} Enregistrer</button>
-      ${existing ? `<button class="btn danger" type="button" data-delete="${r.id}">${ICON.trash} Supprimer</button>` : ''}
+      ${existing ? `<button class="btn danger" type="button" data-delete="${esc(r.id)}">${ICON.trash} Supprimer</button>` : ''}
     </form>`;
 }
 
@@ -1182,7 +1584,7 @@ async function shareOrDownload(filename, content, type) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
 }
 
-function icsEscape(s) { return String(s || '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/[,;]/g, (c) => `\\${c}`); }
+function icsEscape(s) { return String(s || '').replace(/\r/g, '').replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/[,;]/g, (c) => `\\${c}`); }
 
 function exportIcs(id) {
   const r = byId(id);
@@ -1228,9 +1630,31 @@ function exportIcs(id) {
   shareOrDownload(`${wed ? 'mariage' : 'photobooth'}-${r.start}.ics`, ics, 'text/calendar');
 }
 
-function exportBackup() {
-  const payload = { app: 'booth-planner', version: 2, exportedAt: new Date().toISOString(), settings: state.settings, reservations: state.reservations };
-  shareOrDownload(`booth-planner-sauvegarde-${todayKey()}.json`, JSON.stringify(payload, null, 2), 'application/json');
+async function exportBackup() {
+  const name = `booth-planner-sauvegarde-${todayKey()}.json`;
+  const payload = { reservations: state.reservations, settings: state.settings };
+  if (!vault.key) {
+    shareOrDownload(name, JSON.stringify({ app: 'booth-planner', version: 2, exportedAt: new Date().toISOString(), ...payload }, null, 2), 'application/json');
+    return;
+  }
+  // Appli verrouillée : la sauvegarde est chiffrée avec le même code
+  let content;
+  try {
+    const box = await sealBox(vault.key, vault.salt, vault.iter, payload);
+    content = JSON.stringify({ app: 'booth-planner', version: 3, encrypted: true, exportedAt: new Date().toISOString(), vault: box });
+  } catch (e) {
+    toast('⚠️ Échec de la sauvegarde');
+    return;
+  }
+  // Partage déclenché par un nouveau geste : iOS l'exige après un calcul
+  openSheet({
+    title: 'Sauvegarde chiffrée',
+    right: '<button class="txt-btn r" data-close>OK</button>',
+    body: `<div class="day-hero"><div class="dnum">🔐</div>
+      <p class="hint">Ce fichier est chiffré avec votre code : sans lui, il est illisible. Gardez-le dans Fichiers ou iCloud Drive.</p></div>
+      <button class="btn" id="shareBackup">${ICON.upload} Enregistrer le fichier</button>`,
+    onMount(sheet) { sheet.querySelector('#shareBackup').addEventListener('click', () => shareOrDownload(name, content, 'application/json')); },
+  });
 }
 
 function exportCsv() {
@@ -1250,7 +1674,13 @@ function exportCsv() {
     if (k === 'checklist') return isWedding(r) ? WEDDING_TODOS.filter(([s]) => (r.checklist || {})[s]).map(([, l]) => l).join(', ') : '';
     return r[k];
   };
-  const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  // Une cellule qui commence par = + - @ serait exécutée comme une formule
+  // par Excel / Numbers : on la neutralise (injection CSV).
+  const cell = (v) => {
+    let txt = String(v ?? '');
+    if (/^[=+\-@\t\r]/.test(txt)) txt = `'${txt}`;
+    return `"${txt.replace(/"/g, '""')}"`;
+  };
   const lines = [cols.map(([, l]) => cell(l)).join(';')];
   sortByDate(state.reservations).forEach((r) => {
     lines.push(cols.map(([k]) => cell(value(r, k))).join(';'));
@@ -1260,29 +1690,39 @@ function exportCsv() {
 
 function importBackup(e) {
   const file = e.target.files && e.target.files[0];
+  e.target.value = '';
   if (!file) return;
+  if (file.size > 5 * 1024 * 1024) { toast('Fichier trop volumineux'); return; }
   const reader = new FileReader();
-  reader.onload = () => {
-    try {
-      const data = JSON.parse(reader.result);
-      const list = Array.isArray(data) ? data : data.reservations;
-      if (!Array.isArray(list)) throw new Error('format');
-      const valid = list.filter((r) => r && typeof r.start === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(r.start))
-        .map((r) => ({
-          ...r, id: r.id || uid(), status: r.status === 'booked' ? 'booked' : 'pending', cal: r.cal === 'wedding' ? 'wedding' : 'booth',
-        })).map(normalize);
-      if (!confirm(`Restaurer ${valid.length} réservation(s) ?\nLes données actuelles seront remplacées.`)) return;
-      state.reservations = valid;
-      if (data.settings) Object.assign(state.settings, data.settings);
-      state.cal = CAL_MODES.includes(state.settings.cal) ? state.settings.cal : 'all';
-      save(); render();
-      toast('Sauvegarde restaurée ✓');
-    } catch (err) {
-      toast('Fichier de sauvegarde invalide');
+  reader.onload = async () => {
+    let data;
+    try { data = JSON.parse(reader.result); } catch (err) { toast('Fichier de sauvegarde invalide'); return; }
+    if (data && data.encrypted) {
+      const box = data.vault;
+      if (!validBox(box) || !cryptoOK()) { toast('Sauvegarde chiffrée illisible'); return; }
+      let payload = null;
+      const ok = await askCode({
+        title: 'Sauvegarde chiffrée',
+        subtitle: 'Code de l\'appli au moment de la sauvegarde',
+        validate: async (c) => {
+          try { payload = await openBox(await deriveKey(c, fromB64(box.salt), box.iter), box); return null; } catch (x) { return 'Code incorrect'; }
+        },
+      });
+      if (!ok) return;
+      data = payload;
     }
+    const list = Array.isArray(data) ? data : data && data.reservations;
+    if (!Array.isArray(list)) { toast('Fichier de sauvegarde invalide'); return; }
+    const valid = cleanList(list);
+    if (!confirm(`Restaurer ${valid.length} réservation(s) ?\nLes données actuelles seront remplacées.`)) return;
+    state.reservations = valid;
+    if (data.settings) state.settings = cleanSettings({ ...state.settings, ...data.settings });
+    state.cal = state.settings.cal;
+    save();
+    render();
+    toast('Sauvegarde restaurée ✓');
   };
   reader.readAsText(file);
-  e.target.value = '';
 }
 
 function openClient(key) {
@@ -1315,6 +1755,7 @@ function openClient(key) {
 /* ---------------- Délégation d'événements ---------------- */
 
 document.addEventListener('click', (e) => {
+  if (isLocked()) return;
   const t = e.target.closest('[data-tab],[data-act],[data-day],[data-open],[data-new-on],[data-edit],[data-delete],[data-confirm],[data-ics],[data-close],[data-client],[data-new-client],[data-setcal],[data-step],[data-setstage]');
   if (!t) return;
   const d = t.dataset;
@@ -1351,6 +1792,10 @@ document.addEventListener('click', (e) => {
       cal: state.cal === 'wedding' ? 'wedding' : 'booth',
     }); break;
     case 'export': exportBackup(); break;
+    case 'lock-on': enableLock(); break;
+    case 'lock-change': changeLockCode(); break;
+    case 'lock-off': disableLock(); break;
+    case 'lock-now': lockNow(); break;
     case 'csv': exportCsv(); break;
     case 'import': document.getElementById('importFile').click(); break;
     case 'wipe':
@@ -1364,8 +1809,12 @@ document.addEventListener('click', (e) => {
 
 /* ---------------- Démarrage ---------------- */
 
-load();
-render();
+function boot() {
+  // Refuse de s'afficher à l'intérieur d'un autre site (clickjacking)
+  if (window.top !== window.self) { document.body.textContent = ''; return; }
+  if (hasVault()) showLock(); else { load(); render(); }
+}
+boot();
 
 // Demande au navigateur de ne pas effacer les données
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
@@ -1375,5 +1824,11 @@ if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.
   window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
 }
 
-// Retour sur l'appli après minuit : on rafraîchit "aujourd'hui"
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !sheets.length) render(); });
+// Verrouillage automatique après 1 min hors de l'appli ; sinon, au retour,
+// on rafraîchit l'affichage (« aujourd'hui » a pu changer).
+let hiddenAt = 0;
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  if (vault.key && hiddenAt && Date.now() - hiddenAt >= AUTO_LOCK_MS) { lockNow(); return; }
+  if (!isLocked() && !sheets.length) render();
+});

@@ -78,6 +78,53 @@ Toutes les données restent **sur l'iPhone**, dans l'application. Rien n'est
 envoyé sur Internet. Le serveur ne fait que fournir les fichiers de l'appli.
 Pensez à exporter une sauvegarde de temps en temps (Réglages → Exporter).
 
+## 🔐 Sécurité
+
+**Il n'y a rien à pirater en ligne.** Pas de serveur, pas de compte, pas de
+mot de passe stocké quelque part, pas d'espace « admin » : une adresse comme
+`…/admin` affiche simplement « Page introuvable ». Le site ne fait que
+distribuer les fichiers de l'appli ; les réservations ne quittent jamais
+l'iPhone.
+
+**Verrouillage par code** (Réglages → Sécurité → Protéger l'appli par un code) :
+- code à 6 chiffres, codes trop simples refusés (123456, 111111, 121212…) ;
+- les données sont **chiffrées sur l'iPhone** (AES-GCM 256 bits, clé dérivée
+  du code par PBKDF2-SHA-256 avec 600 000 itérations et un sel aléatoire) ;
+  la clé n'existe qu'en mémoire, pendant que l'appli est déverrouillée ;
+- verrouillage automatique après 1 minute hors de l'appli, et bouton
+  « Verrouiller maintenant » ;
+- anti-essais : après 5 erreurs, attente de 30 s, doublée à chaque nouvelle
+  erreur (15 min au maximum) ;
+- changer ou désactiver le code demande le code actuel ;
+- **code oublié = données irrécupérables** : la seule solution est de tout
+  effacer puis de restaurer une sauvegarde. Gardez donc des sauvegardes.
+
+**Sauvegardes** : quand le verrouillage est actif, les fichiers de
+sauvegarde sont chiffrés avec le même code. L'export CSV (pour Excel) reste
+en clair ; les cellules qui ressembleraient à une formule sont neutralisées.
+
+**Protections techniques** :
+- politique de sécurité du contenu (CSP) : seul le code de l'appli peut
+  s'exécuter, et l'appli ne peut se connecter à aucun autre site ;
+- tout ce qui est lu (stockage, fichier de sauvegarde) est validé, et tout ce
+  qui est affiché est échappé : un fichier piégé ne peut rien injecter ;
+- l'appli refuse de s'afficher dans le cadre d'un autre site, n'est pas
+  indexée par les moteurs de recherche et ne transmet pas son adresse aux
+  liens ouverts (Plans, etc.).
+
+**Limites, à connaître** : un code à 6 chiffres protège très bien contre
+quelqu'un qui prend votre iPhone en main. En revanche, une personne qui
+mettrait la main sur un fichier de sauvegarde et disposerait de gros moyens
+de calcul pourrait finir par tester les 1 000 000 de codes possibles :
+rangez vos sauvegardes dans un endroit privé (Fichiers, iCloud). La première
+protection reste le code de verrouillage de l'iPhone. Le code source de
+l'appli est public, ce qui est normal : la sécurité repose sur votre code
+secret, pas sur le secret du programme.
+
+**Bonnes pratiques** : activer la double authentification sur GitHub (et
+Netlify), ne jamais déposer de fichier de sauvegarde ou de jeton d'accès dans
+le dépôt, et supprimer les jetons qui ne servent plus.
+
 ## Installation sur l'iPhone
 
 L'iPhone doit pouvoir ouvrir l'appli une première fois via une adresse
@@ -138,8 +185,9 @@ python3 -m http.server 8000
 
 | Fichier | Rôle |
 | --- | --- |
-| `index.html` | Structure de l'appli et barre d'onglets |
+| `index.html` | Structure de l'appli, barre d'onglets et politique de sécurité (CSP) |
 | `styles.css` | Design (style iOS, clair / sombre) |
 | `app.js` | Logique : calendrier, réservations, clients, sauvegardes |
+| `404.html` | Page « introuvable » pour toute adresse inconnue (`/admin`…) |
 | `sw.js` | Fonctionnement hors ligne (incrémenter `VERSION` à chaque mise à jour) |
 | `manifest.webmanifest`, `icons/` | Nom, icône et affichage plein écran |
